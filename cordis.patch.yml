@@ -1,0 +1,3 @@
+- insert:
+    - id: bmad-sprint-board
+      name: '@local/dsh-plugin-bmad-sprint-board'

@@ -1,0 +1,53 @@
+{
+    "name": "@local/dsh-plugin-bmad-sprint-board",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "Read a BMAD project in the Session sidebar: sprint board, requirements, and standalone specs",
+    "icon": "./icon.svg",
+    "exports": {
+        ".": "./index.js",
+        "./client": "./client.js",
+        "./locale/*.json": "./locale/*.json",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "LICENSE",
+        "icon.svg",
+        "client.js",
+        "index.js",
+        "cordis.patch.yml",
+        "locale/*.json"
+    ],
+    "scripts": {
+        "build": "node build.mjs",
+        "check": "node build.mjs --check",
+        "test": "node --test src/*.test.js"
+    },
+    "dsh": {
+        "bundle": {
+            "patch": "./cordis.patch.yml"
+        },
+        "client": {
+            "platform": "web",
+            "immediately": true,
+            "inject": [
+                "@deepseek-ai/dsh-client-ui-sidebar-right"
+            ]
+        }
+    },
+    "license": "MIT",
+    "peerDependencies": {
+        "@deepseek-ai/dsh": "^0.2.0-0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/vitaliy-bobrov/dsh-plugin-bmad-sprint-board.git"
+    },
+    "keywords": [
+        "dsh",
+        "dsh-plugin",
+        "bmad",
+        "sprint",
+        "board"
+    ]
+}
