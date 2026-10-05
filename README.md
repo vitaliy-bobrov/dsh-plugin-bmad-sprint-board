@@ -81,26 +81,35 @@ it rather than squat on one.
 
 ## Install
 
-**From npm** — nothing to build, no dependencies, no install scripts:
+From npm, into the `web` profile:
+
+```sh
+dsh plugin --profile web add dsh-plugin-bmad-sprint-board
+```
+
+Or from the repository, and from a local clone:
+
+```sh
+dsh plugin --profile web add github:vitaliy-bobrov/dsh-plugin-bmad-sprint-board
+dsh plugin --profile web add /path/to/bmad-sprint-board-bundle
+```
+
+Substitute your own profile name for `web`. Nothing needs building, the package
+has no dependencies, and it runs no install scripts. Reload the page afterwards:
+the Client half registers on the next load, and the Host half contributes nothing
+to register.
+
+The same three, through the agent's tool rather than the CLI:
 
 ```
 plugin_manager({ action: "install_bundle",
                  target: "dsh-plugin-bmad-sprint-board" })
 ```
 
-**From the repository:**
+### Category
 
-```
-plugin_manager({ action: "install_bundle",
-                 target: "github:vitaliy-bobrov/dsh-plugin-bmad-sprint-board" })
-```
-
-**From a local clone**, which is the form used while developing it:
-
-```
-plugin_manager({ action: "install_bundle",
-                 target: "/path/to/bmad-sprint-board-bundle" })
-```
+**UI & Experience.** It adds a sidebar tab and reads. It contributes no tool, no
+model and no service, and it writes nothing.
 
 ### Peer dependency
 
