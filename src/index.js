@@ -2,7 +2,7 @@
  * The core's public surface, for Node consumers: tests today, a second shell
  * or an agent tool later.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/core
+ * @module dsh-plugin-bmad-sprint-board/core
  */
 export * from './core.js'
 export * from './config.js'

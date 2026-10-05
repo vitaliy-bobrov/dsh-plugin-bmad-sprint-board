@@ -16,7 +16,7 @@
  * document is only reported when nothing in the plan carries it, and the finding
  * says which plan was asked.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/planning
+ * @module dsh-plugin-bmad-sprint-board/planning
  */
 
 /** A directory in the planning folder that holds dated artefacts. */

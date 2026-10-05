@@ -7,7 +7,7 @@
  * is the canonical status view's fourth element, and inventing a rival opinion
  * about priority is exactly what the research said not to do.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/plan
+ * @module dsh-plugin-bmad-sprint-board/plan
  */
 
 /** Statuses in the order the framework ranks them, worst-first for action. */

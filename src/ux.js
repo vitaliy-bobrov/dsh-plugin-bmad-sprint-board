@@ -9,7 +9,7 @@
  * Neither shows up as a gap anywhere else, because the coverage map is
  * functional-only.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/ux
+ * @module dsh-plugin-bmad-sprint-board/ux
  */
 
 /** The directory UX runs live in, relative to the declared planning folder. */

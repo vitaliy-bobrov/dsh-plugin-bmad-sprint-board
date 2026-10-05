@@ -10,7 +10,7 @@
  *      returns an `unverifiable` entry rather than nothing, because a board
  *      showing nothing must never be confusable with a board that cannot see.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/detect
+ * @module dsh-plugin-bmad-sprint-board/detect
  */
 
 /** Severity vocabulary, borrowed from bmad-loop's deferred ledger. */

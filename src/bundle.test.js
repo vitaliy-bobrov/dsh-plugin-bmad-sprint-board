@@ -46,7 +46,7 @@ function materialize(text) {
 
 test('the bundle registers under its own id', () => {
   const { registered } = materialize(source)
-  assert.equal(registered.id, '@local/dsh-plugin-bmad-sprint-board')
+  assert.equal(registered.id, 'dsh-plugin-bmad-sprint-board')
 })
 
 test('the factory materializes without throwing', () => {

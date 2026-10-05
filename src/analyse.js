@@ -5,7 +5,7 @@
  * function, not the module graph, and `build.mjs` strips the imports below
  * because every symbol is already in scope once the pieces are concatenated.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/analyse
+ * @module dsh-plugin-bmad-sprint-board/analyse
  */
 import { buildModel } from './core.js'
 import { detect } from './detect.js'

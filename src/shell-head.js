@@ -6,11 +6,11 @@
  * it. The board is strictly read-only: it reads three workspace files through
  * the Host `workspaceFiles` Remote face and never writes to them.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/client
+ * @module dsh-plugin-bmad-sprint-board/client
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-plugin-bmad-sprint-board',
+  id: 'dsh-plugin-bmad-sprint-board',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
     /** Dictionary namespace owned by this plugin. */
     const NS = 'bmadSprintBoard';
     /** This implementation's identity: the tab type id and the body's cell key. */
-    const PLUGIN_ID = '@local/dsh-plugin-bmad-sprint-board';
+    const PLUGIN_ID = 'dsh-plugin-bmad-sprint-board';
     /** Page kind the guide entry opens. */
     const TAB_KIND = 'bmad-sprint-board';
     /** Command id of the keybinding that opens the board. */

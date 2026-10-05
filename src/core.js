@@ -9,7 +9,7 @@
  * arrives as a palette. That constraint is what lets the same core back a
  * second shell, and it is asserted by src/boundary.test.js.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/core
+ * @module dsh-plugin-bmad-sprint-board/core
  */
 
 /** Names a BMAD sprint-tracking file goes by, in preference order. */

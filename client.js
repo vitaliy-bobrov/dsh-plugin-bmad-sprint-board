@@ -21,11 +21,11 @@
  * it. The board is strictly read-only: it reads three workspace files through
  * the Host `workspaceFiles` Remote face and never writes to them.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/client
+ * @module dsh-plugin-bmad-sprint-board/client
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-plugin-bmad-sprint-board',
+  id: 'dsh-plugin-bmad-sprint-board',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
     /** Dictionary namespace owned by this plugin. */
     const NS = 'bmadSprintBoard';
     /** This implementation's identity: the tab type id and the body's cell key. */
-    const PLUGIN_ID = '@local/dsh-plugin-bmad-sprint-board';
+    const PLUGIN_ID = 'dsh-plugin-bmad-sprint-board';
     /** Page kind the guide entry opens. */
     const TAB_KIND = 'bmad-sprint-board';
     /** Command id of the keybinding that opens the board. */
@@ -109,7 +109,7 @@ window.__ModuleLoader__.load({
      * arrives as a palette. That constraint is what lets the same core back a
      * second shell, and it is asserted by src/boundary.test.js.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/core
+     * @module dsh-plugin-bmad-sprint-board/core
      */
 
     /** Names a BMAD sprint-tracking file goes by, in preference order. */
@@ -919,7 +919,7 @@ window.__ModuleLoader__.load({
      * conventional-candidate probe and the bounded scan stay, but only as the
      * fallback for when config is absent or silent.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/config
+     * @module dsh-plugin-bmad-sprint-board/config
      */
 
     /** The token BMAD writes where the project root belongs. */
@@ -1008,7 +1008,7 @@ window.__ModuleLoader__.load({
      *      returns an `unverifiable` entry rather than nothing, because a board
      *      showing nothing must never be confusable with a board that cannot see.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/detect
+     * @module dsh-plugin-bmad-sprint-board/detect
      */
 
     /** Severity vocabulary, borrowed from bmad-loop's deferred ledger. */
@@ -1204,7 +1204,7 @@ window.__ModuleLoader__.load({
      * is the canonical status view's fourth element, and inventing a rival opinion
      * about priority is exactly what the research said not to do.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/plan
+     * @module dsh-plugin-bmad-sprint-board/plan
      */
 
     /** Statuses in the order the framework ranks them, worst-first for action. */
@@ -1497,7 +1497,7 @@ window.__ModuleLoader__.load({
      * Neither shows up as a gap anywhere else, because the coverage map is
      * functional-only.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/ux
+     * @module dsh-plugin-bmad-sprint-board/ux
      */
 
     /** The directory UX runs live in, relative to the declared planning folder. */
@@ -1730,7 +1730,7 @@ window.__ModuleLoader__.load({
      * three are unstarted, and it does not hide them. A requirement with no evidence
      * path reads as unverifiable, which is a different thing from not done.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/requirements
+     * @module dsh-plugin-bmad-sprint-board/requirements
      */
 
 
@@ -2074,7 +2074,7 @@ window.__ModuleLoader__.load({
      * document is only reported when nothing in the plan carries it, and the finding
      * says which plan was asked.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/planning
+     * @module dsh-plugin-bmad-sprint-board/planning
      */
 
     /** A directory in the planning folder that holds dated artefacts. */
@@ -2183,7 +2183,7 @@ window.__ModuleLoader__.load({
      * function, not the module graph, and `build.mjs` strips the imports below
      * because every symbol is already in scope once the pieces are concatenated.
      *
-     * @module @local/dsh-plugin-bmad-sprint-board/analyse
+     * @module dsh-plugin-bmad-sprint-board/analyse
      */
 
 

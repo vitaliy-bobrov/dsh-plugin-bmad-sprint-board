@@ -1,5 +1,5 @@
 {
-    "name": "@local/dsh-plugin-bmad-sprint-board",
+    "name": "dsh-plugin-bmad-sprint-board",
     "version": "1.0.0",
     "type": "module",
     "description": "Read a BMAD project in the Session sidebar: sprint board, requirements, and standalone specs",

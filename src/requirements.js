@@ -7,7 +7,7 @@
  * three are unstarted, and it does not hide them. A requirement with no evidence
  * path reads as unverifiable, which is a different thing from not done.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/requirements
+ * @module dsh-plugin-bmad-sprint-board/requirements
  */
 
 import { REQUIREMENT_CLASSES, parseRequirementInventory } from './plan.js'

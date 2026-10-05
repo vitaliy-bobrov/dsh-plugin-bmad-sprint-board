@@ -7,7 +7,7 @@
  * conventional-candidate probe and the bounded scan stay, but only as the
  * fallback for when config is absent or silent.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/config
+ * @module dsh-plugin-bmad-sprint-board/config
  */
 
 /** The token BMAD writes where the project root belongs. */
