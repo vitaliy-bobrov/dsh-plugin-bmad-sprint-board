@@ -60,25 +60,27 @@ The board is a **check on** the ticket store, not a mirror of it.
 
 | Detector | Fires when |
 |---|---|
-| **L1** plans not linked | plan files match tickets by name, but no entry declares them with a `ticket` key |
-| **L2** tickets with no plan | an index entry has no plan file, so its state is unknown |
+| **L1** unreadable ticket files | a file in a ticket folder is neither a leaf ticket nor a plan, so the store ignores it |
+| **L2** unlisted leaves | a leaf ticket exists on disk with no entry in the ticket index |
 | **L3** plans no ticket claims | a plan file corresponds to no index entry |
 | **L4** unrecognised status | a ticket carries a status word this board does not know |
 | **C1** epic settled with open tickets | an epic says `done` while tickets inside it are not |
 | **C2** initiative settled with open tickets | an initiative says `done` while tickets inside it are not |
 | **E1** initiative declares no epics | the folder exists and its store lists no epics |
 
-**L1 is the one that matters on a migrated project.** BMAD's own `tickets.py`
-links a plan to its entry through the plan's `ticket` key. A plan without one is
-invisible to the tooling, which then reports the ticket as unstarted however
-finished the plan is — so every number the tooling prints is wrong while every
-file on disk looks correct.
+**L1 is the one that matters on a migrated project.** The ticket store decides
+what a file is from its frontmatter `type`: `story`, `spike` or `bug` is a leaf
+that carries the ticket, anything else declaring a `ticket` key is a plan over
+one, and anything else is ignored. A file named `story-x-plan.md` whose type is
+`feature` and which names no ticket is therefore *neither* — invisible to the
+tooling, which reports its ticket as backlog however finished the work is. Every
+number it prints is wrong while every file on disk looks correct.
 
-**Unverifiable is a state, never a silence.** A ticket with no plan has an
-*unknown* state, not a default one; it is counted in its own lane and reported,
-never folded into "not started". A status word the board does not recognise is
-shown but never counted as settled, because guessing that an unfamiliar word
-means finished is how a board starts lying.
+**The board's lanes are the store's lanes.** States come from `tickets.py`'s own
+table rather than being invented: an empty status is **backlog**, because a planned
+story looks exactly like that before `bmad-build` writes its plan — a plan is an
+artefact of building, not a precondition of existing. Only a status word the store
+does not define becomes *unknown*, and it is shown but never counted as settled.
 
 ### How it reads a v7 project
 

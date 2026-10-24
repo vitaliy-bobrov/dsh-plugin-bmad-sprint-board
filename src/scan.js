@@ -15,7 +15,7 @@
 
 import { CONFIG_LAYERS, detectedVersion, resolveConfig } from './config.js'
 import { buildInitiative } from './model.js'
-import { PLAN_SUFFIX, readEpicIndex } from './store.js'
+import { readEpicIndex } from './store.js'
 
 /** How many reads the scan keeps in flight; the same figure the shell used. */
 export const READ_CONCURRENCY = 8
@@ -112,15 +112,18 @@ async function readEpic(io, initiativeDir, row, signal, unreadable) {
     tryList(io, join(folder, 'tickets'), signal),
   ])
 
+  // Every markdown file in the folder: the store tells leaves from plans by
+  // their frontmatter, and a file name is not a reliable signal for that. A
+  // `*-plan.md` whose type is not a leaf type and which names no ticket is
+  // neither, and reading only the plans would hide that instead of reporting it.
   const names = listing
-    .filter((entry) => entry.type === 'file' && entry.name.endsWith(PLAN_SUFFIX))
+    .filter((entry) => entry.type === 'file' && entry.name.endsWith('.md'))
     .map((entry) => entry.name)
     .sort()
 
-  // A plan that the directory listing named and the reader could not open is a
-  // real problem -- it exists and its state is hidden -- so only this read is
-  // recorded when it fails.
-  const plans = await mapLimit(names, READ_CONCURRENCY, async (name) => {
+  // A file the directory listing named and the reader could not open is a real
+  // problem -- it exists and its state is hidden -- so this read is recorded.
+  const files = await mapLimit(names, READ_CONCURRENCY, async (name) => {
     const path = join(join(folder, 'tickets'), name)
     const text = await tryRead(io, path, signal)
     if (text === null) {
@@ -130,7 +133,7 @@ async function readEpic(io, initiativeDir, row, signal, unreadable) {
     return { path, text }
   })
 
-  return { ...row, folder, ticket, storyIndex, plans: plans.filter(Boolean) }
+  return { ...row, folder, ticket, storyIndex, files: files.filter(Boolean) }
 }
 
 /**

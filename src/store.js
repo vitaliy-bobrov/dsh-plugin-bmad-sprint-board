@@ -24,6 +24,17 @@ import { listOf, readFrontmatter, stringOf } from './frontmatter.js'
 export const PLAN_SUFFIX = '-plan.md'
 
 /**
+ * The types the ticket store treats as a ticket in its own right.
+ *
+ * `tickets.py` decides what a file is by its frontmatter `type`, not by its
+ * name: one of these types is a leaf that carries the ticket, anything else
+ * that declares a `ticket` key is a plan over one, and anything else is ignored.
+ * A file named `story-x-plan.md` whose type is `feature` is therefore neither,
+ * which is exactly how a migrated project quietly loses its plans.
+ */
+export const LEAF_TYPES = new Set(['story', 'spike', 'bug'])
+
+/**
  * Reduce a title to the slug BMAD derives file names from.
  *
  * @param {string} title - a ticket title.
@@ -70,6 +81,39 @@ export function readStoryIndex(text) {
 }
 
 /**
+ * Read a ticket file -- the leaf that carries the ticket itself.
+ *
+ * @param {string} text - the file's contents.
+ * @param {string} path - its workspace-relative path.
+ * @returns {{path: string, id: string|null, type: string|null, title: string|null, status: string}} the leaf.
+ */
+export function readLeaf(text, path) {
+  const { data } = readFrontmatter(text)
+  return {
+    path,
+    id: stringOf(data, 'id'),
+    type: stringOf(data, 'type'),
+    title: stringOf(data, 'title'),
+    // an absent status is the empty string, which the store maps to backlog
+    status: stringOf(data, 'status') ?? '',
+  }
+}
+
+/**
+ * Decide what a file in a ticket folder is.
+ *
+ * @param {string} text - the file's contents.
+ * @returns {'leaf'|'plan'|'other'} the role the ticket store would give it.
+ */
+export function classify(text) {
+  const { data } = readFrontmatter(text)
+  const type = stringOf(data, 'type')
+  if (type !== null && LEAF_TYPES.has(type)) return 'leaf'
+  if (stringOf(data, 'ticket') !== null) return 'plan'
+  return 'other'
+}
+
+/**
  * Read a plan file's frontmatter into the fields the board uses.
  *
  * @param {string} text - the plan file's contents.
@@ -82,8 +126,9 @@ export function readPlan(text, path) {
     path,
     title: stringOf(data, 'title'),
     type: stringOf(data, 'type'),
-    status: stringOf(data, 'status'),
     ticket: stringOf(data, 'ticket'),
+    status: stringOf(data, 'status') ?? '',
+    blockedReason: stringOf(data, 'blocked_reason'),
     baseline: stringOf(data, 'baseline_commit'),
     context: listOf(data, 'context'),
   }

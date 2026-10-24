@@ -517,6 +517,17 @@ window.__ModuleLoader__.load({
     const PLAN_SUFFIX = '-plan.md'
 
     /**
+     * The types the ticket store treats as a ticket in its own right.
+     *
+     * `tickets.py` decides what a file is by its frontmatter `type`, not by its
+     * name: one of these types is a leaf that carries the ticket, anything else
+     * that declares a `ticket` key is a plan over one, and anything else is ignored.
+     * A file named `story-x-plan.md` whose type is `feature` is therefore neither,
+     * which is exactly how a migrated project quietly loses its plans.
+     */
+    const LEAF_TYPES = new Set(['story', 'spike', 'bug'])
+
+    /**
      * Reduce a title to the slug BMAD derives file names from.
      *
      * @param {string} title - a ticket title.
@@ -563,6 +574,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Read a ticket file -- the leaf that carries the ticket itself.
+     *
+     * @param {string} text - the file's contents.
+     * @param {string} path - its workspace-relative path.
+     * @returns {{path: string, id: string|null, type: string|null, title: string|null, status: string}} the leaf.
+     */
+    function readLeaf(text, path) {
+      const { data } = readFrontmatter(text)
+      return {
+        path,
+        id: stringOf(data, 'id'),
+        type: stringOf(data, 'type'),
+        title: stringOf(data, 'title'),
+        // an absent status is the empty string, which the store maps to backlog
+        status: stringOf(data, 'status') ?? '',
+      }
+    }
+
+    /**
+     * Decide what a file in a ticket folder is.
+     *
+     * @param {string} text - the file's contents.
+     * @returns {'leaf'|'plan'|'other'} the role the ticket store would give it.
+     */
+    function classify(text) {
+      const { data } = readFrontmatter(text)
+      const type = stringOf(data, 'type')
+      if (type !== null && LEAF_TYPES.has(type)) return 'leaf'
+      if (stringOf(data, 'ticket') !== null) return 'plan'
+      return 'other'
+    }
+
+    /**
      * Read a plan file's frontmatter into the fields the board uses.
      *
      * @param {string} text - the plan file's contents.
@@ -575,8 +619,9 @@ window.__ModuleLoader__.load({
         path,
         title: stringOf(data, 'title'),
         type: stringOf(data, 'type'),
-        status: stringOf(data, 'status'),
         ticket: stringOf(data, 'ticket'),
+        status: stringOf(data, 'status') ?? '',
+        blockedReason: stringOf(data, 'blocked_reason'),
         baseline: stringOf(data, 'baseline_commit'),
         context: listOf(data, 'context'),
       }
@@ -673,28 +718,53 @@ window.__ModuleLoader__.load({
 
 
     /**
-     * The published order of ticket states, oldest first.
+     * The store's own status-to-state table.
      *
-     * These are the words BMAD v7 writes into a plan's `status`: the builds write
-     * `draft` through `built`, an unattended run writes `blocked` when it halts, and
-     * Sofia writes `done` or `dropped`. `in-progress` and `review` come from the PO
-     * skill's own vocabulary and appear on real tickets, so they are carried too.
+     * Copied from `tickets.py` rather than invented, because the board's lanes have
+     * to be the lanes `tickets.py status` reports or the two disagree about the same
+     * repository. An empty status is **backlog**: a ticket exists in the index and
+     * nothing has happened to it, which is exactly how a planned story looks before
+     * `bmad-build` writes its plan. Reading that as "unknown" was this board getting
+     * it wrong -- a plan is an artefact of building, not a precondition of existing.
      */
-    const STATUS_ORDER = [
-      'blocked',
-      'in-progress',
-      'review',
-      'built',
-      'draft',
-      'done',
-      'dropped',
-    ]
+    const STATE_OF = {
+      '': 'backlog',
+      draft: 'backlog',
+      'ready-for-dev': 'backlog',
+      'in-progress': 'in-progress',
+      blocked: 'in-progress',
+      'in-review': 'review',
+      built: 'review',
+      done: 'done',
+      dropped: 'dropped',
+    }
 
-    /** States that mean the work is finished, whichever word was used. */
+    /** The lane order, earliest first. */
+    const STATE_ORDER = ['backlog', 'in-progress', 'review', 'done', 'dropped']
+
+    /** States that mean the work is finished. */
     const SETTLED = new Set(['done', 'dropped'])
 
-    /** The words the board recognises; anything else is reported as unrecognised. */
-    const KNOWN_STATUS = new Set(STATUS_ORDER)
+    /** Every status word the store understands. */
+    const KNOWN_STATUS = new Set(Object.keys(STATE_OF))
+
+    /** The lanes, plus the one for a word the store does not understand. */
+    const STATUS_ORDER = [...STATE_ORDER, 'unknown']
+
+    /**
+     * Map a status word to the lane it belongs in.
+     *
+     * A word the store does not know becomes its own lane and a finding, rather than
+     * being guessed at: `tickets.py` treats an unrecognised status as blocked, and
+     * silently inheriting that would hide a broken ticket behind a normal one.
+     *
+     * @param {string} status - the word from the ticket.
+     * @returns {string} the lane.
+     */
+    function stateOf(status) {
+      const word = String(status ?? '')
+      return Object.hasOwn(STATE_OF, word) ? STATE_OF[word] : 'unknown'
+    }
 
     /**
      * Turn a BMAD slug into something a reader can scan.
@@ -751,16 +821,17 @@ window.__ModuleLoader__.load({
     /**
      * Decide a ticket's displayed state.
      *
-     * A v7 story carries no status in `tickets.toml`; the state lives in its plan.
-     * So a ticket whose plan is missing has an *unknown* state, not a default one,
-     * and the board shows that rather than counting it as not started.
+     * A plan overrides its leaf, and a leaf overrides the index row. With neither,
+     * the ticket is backlog -- not unknown. The only way to be unknown is to carry a
+     * status word the store does not define.
      *
-     * @param {object|null} plan - from {@link readPlan}, or null.
-     * @returns {string|null} the status, or null when nothing declares one.
+     * @param {object|null} plan - the joined plan, or null.
+     * @param {object|null} leaf - the leaf file, or null.
+     * @returns {string} the lane.
      */
-    function ticketStatus(plan) {
-      if (plan === null || plan === undefined) return null
-      return plan.status
+    function ticketStatus(plan, leaf) {
+      const word = plan?.status ?? leaf?.status ?? ''
+      return stateOf(word)
     }
 
     /**
@@ -779,22 +850,69 @@ window.__ModuleLoader__.load({
       const built = epics.map((epic) => {
         const header = readEpicTicket(epic.ticket)
         const entries = readStoryIndex(epic.storyIndex)
-        const plans = (epic.plans ?? []).map((plan) => readPlan(plan.text, plan.path))
-        const { links, unlinked, orphans, missing } = linkPlans(entries, plans)
 
-        const tickets = entries.map((entry) => {
-          const plan = links.get(entry.id) ?? null
+        // The store decides what a file is by its frontmatter type, not its name:
+        // a leaf carries a ticket, a file with a `ticket` key is a plan over one,
+        // and anything else is ignored. Splitting on the file name instead is what
+        // made a folder of `*-plan.md` files invisible.
+        const leaves = []
+        const plans = []
+        const ignored = []
+        for (const file of epic.files ?? []) {
+          const role = classify(file.text)
+          if (role === 'leaf') leaves.push(readLeaf(file.text, file.path))
+          else if (role === 'plan') plans.push(readPlan(file.text, file.path))
+          else ignored.push(file.path)
+        }
+
+        const usedLeaves = new Set()
+        const usedPlans = new Set()
+
+        const build = (entry) => {
+          const leaf = leaves.find((l) => l.id !== null && l.id === entry.id
+            || l.path === `${entry.type}-${slugify(entry.title)}.md`) ?? null
+          if (leaf !== null) usedLeaves.add(leaf.path)
+          const plan = plans.find((pl) => pl.ticket === entry.id) ?? null
+          if (plan !== null) usedPlans.add(plan.path)
+          const word = plan?.status ?? leaf?.status ?? ''
           return {
             id: entry.id,
             ref: `${epic.id ?? '?'}.${entry.id}`,
             type: entry.type,
-            title: entry.title,
+            title: leaf?.title ?? entry.title,
             v6Key: entry.v6Key,
-            status: ticketStatus(plan),
+            word,
+            status: ticketStatus(plan, leaf),
             plan,
-            linkedBy: plan === null ? 'none' : plan.ticket === null ? 'name' : 'ticket',
+            leaf,
+            linkedBy: plan === null ? 'none' : 'ticket',
           }
-        })
+        }
+
+        const tickets = entries.map(build)
+
+        // A leaf the index does not list is still a ticket the store knows about.
+        for (const leaf of leaves) {
+          if (usedLeaves.has(leaf.path) || leaf.id === null) continue
+          if (entries.some((entry) => entry.id === leaf.id)) continue
+          const plan = plans.find((pl) => pl.ticket === leaf.id) ?? null
+          if (plan !== null) usedPlans.add(plan.path)
+          tickets.push({
+            id: leaf.id,
+            ref: `${epic.id ?? '?'}.${leaf.id}`,
+            type: leaf.type ?? 'story',
+            title: leaf.title ?? leaf.path,
+            v6Key: null,
+            word: plan?.status ?? leaf.status,
+            status: ticketStatus(plan, leaf),
+            plan,
+            leaf,
+            linkedBy: plan === null ? 'none' : 'ticket',
+            unlisted: true,
+          })
+        }
+
+        const orphans = plans.filter((pl) => !usedPlans.has(pl.path))
 
         return {
           id: epic.id,
@@ -804,8 +922,8 @@ window.__ModuleLoader__.load({
           status: header.status,
           tickets,
           orphans,
-          unlinked: unlinked.length,
-          missing: missing.map((entry) => entry.id),
+          ignored,
+          leaves: leaves.length,
         }
       })
 
@@ -815,10 +933,7 @@ window.__ModuleLoader__.load({
       for (const epic of built) {
         for (const ticket of epic.tickets) {
           total += 1
-          if (ticket.status === null) {
-            unknown += 1
-            continue
-          }
+          if (ticket.status === 'unknown') unknown += 1
           byStatus.set(ticket.status, (byStatus.get(ticket.status) ?? 0) + 1)
         }
       }
@@ -835,8 +950,8 @@ window.__ModuleLoader__.load({
           unknown,
           byStatus,
           settled: [...byStatus].filter(([status]) => SETTLED.has(status)).reduce((n, [, c]) => n + c, 0),
-          unlinkedPlans: built.reduce((n, epic) => n + epic.unlinked, 0),
           orphanPlans: built.reduce((n, epic) => n + epic.orphans.length, 0),
+          ignoredFiles: built.reduce((n, epic) => n + epic.ignored.length, 0),
         },
         unreadable,
       }
@@ -863,9 +978,8 @@ window.__ModuleLoader__.load({
       }
 
       const rank = (status) => {
-        if (status === null) return STATUS_ORDER.length - 1
         const index = STATUS_ORDER.indexOf(status)
-        return index === -1 ? STATUS_ORDER.length - 2 : index
+        return index === -1 ? STATUS_ORDER.length - 1 : index
       }
 
       return [...groups]
@@ -927,44 +1041,49 @@ window.__ModuleLoader__.load({
       const unverifiable = []
       const where = initiative.slug
 
-      // A plan the store does not link is invisible to `tickets.py`, which then
-      // reports the ticket as unstarted however finished the plan is. That is the
-      // single most misleading state a migrated project gets into, because every
+      // A ticket file the store cannot classify is invisible to `tickets.py`. The
+      // store tells leaves from plans by frontmatter type, so a `*-plan.md` whose
+      // type is not `story`/`spike`/`bug` and which names no ticket is neither --
+      // its ticket then reports as backlog however finished the work is. Every
       // number the tooling prints is wrong while every file on disk looks correct.
-      if (initiative.counts.unlinkedPlans > 0) {
-        const example = initiative.epics.find((epic) => epic.unlinked > 0)
+      const ignored = initiative.epics.flatMap((epic) =>
+        epic.ignored.map((path) => ({ epic, path })))
+      if (ignored.length > 0) {
+        const example = ignored[0]
         gaps.push(gap({
           id: 'L1',
-          title: 'plans not linked in the ticket store',
+          title: 'ticket files the store cannot read',
           severity: 'high',
           subject: where,
           subjectKind: 'initiative',
           evidence:
-            `${initiative.counts.unlinkedPlans} plan file(s) match a ticket by name, but no entry `
-            + `declares them with a ticket key -- so the store reports them as unstarted.`,
+            `${ignored.length} file(s) in a ticket folder are neither a leaf ticket nor a plan, `
+            + `so the store ignores them and reports their tickets as backlog.`,
           action: ask(
-            `In ${where}, the ticket store does not link ${initiative.counts.unlinkedPlans} plan file(s) `
-            + `to their entries. Add the entry id to each plan's frontmatter as \`ticket:\` `
-            + `(start with ${example?.folder ?? where}), then re-run \`tickets.py status\`.`,
+            `In ${where}, ${ignored.length} ticket file(s) are invisible to the store: `
+            + `${example.path} and others. Each needs \`type: story\` (or spike/bug) to be a leaf, `
+            + `or a \`ticket: <id>\` key to be a plan. Then re-run \`tickets.py status\`.`,
           ),
         }))
       }
 
-      // An entry with no plan at all: the ticket exists in the index and nowhere
-      // else. Whether that means "not started" or "the plan is missing" cannot be
-      // told from the store, so it is reported as unverifiable rather than counted.
-      const noPlan = initiative.epics.flatMap((epic) =>
-        epic.tickets.filter((ticket) => ticket.plan === null).map((ticket) => ({ epic, ticket })))
-      if (noPlan.length > 0) {
-        unverifiable.push({
+      // A leaf the index does not list is a ticket the store knows and the plan does
+      // not, which is the inverse of an orphan: work exists that nothing schedules.
+      const unlisted = initiative.epics.flatMap((epic) =>
+        epic.tickets.filter((ticket) => ticket.unlisted === true).map((ticket) => ({ epic, ticket })))
+      if (unlisted.length > 0) {
+        gaps.push(gap({
           id: 'L2',
-          title: 'tickets with no plan file',
+          title: 'ticket files no index entry lists',
+          severity: 'medium',
           subject: where,
           subjectKind: 'initiative',
-          evidence: `${noPlan.length} ticket(s) have an index entry but no plan, so their state is unknown.`,
-          tickets: noPlan.map(({ ticket }) => ticket.ref),
-          action: ask(`Which of these are unstarted and which have a missing plan? ${noPlan.map(({ ticket }) => ticket.ref).join(', ')}`),
-        })
+          evidence: `${unlisted.length} leaf ticket(s) exist on disk with no entry in any ticket index.`,
+          action: ask(
+            `These tickets in ${where} have a file but no index entry: `
+            + `${unlisted.map(({ ticket }) => ticket.ref).join(', ')}. Add the entry or remove the file.`,
+          ),
+        }))
       }
 
       // A plan file nothing claims is either a renamed ticket or leftover work.
@@ -990,7 +1109,7 @@ window.__ModuleLoader__.load({
       // starts lying.
       const odd = initiative.epics.flatMap((epic) =>
         epic.tickets
-          .filter((ticket) => ticket.status !== null && !KNOWN_STATUS.has(ticket.status))
+          .filter((ticket) => ticket.status === 'unknown')
           .map((ticket) => ({ epic, ticket })))
       if (odd.length > 0) {
         unverifiable.push({
@@ -999,8 +1118,8 @@ window.__ModuleLoader__.load({
           subject: where,
           subjectKind: 'initiative',
           evidence: `${odd.length} ticket(s) carry a status this board does not recognise, so they are not counted either way.`,
-          tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.status})`),
-          action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.status}`).join(', ')}. Confirm what they mean.`),
+          tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.word})`),
+          action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.word}`).join(', ')}. Confirm what they mean.`),
         })
       }
 
@@ -1008,7 +1127,7 @@ window.__ModuleLoader__.load({
       // migration artefact: the folder was closed, the work inside it was not.
       for (const epic of initiative.epics) {
         if (epic.status === null || !SETTLED.has(epic.status)) continue
-        const open = epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status))
+        const open = epic.tickets.filter((ticket) => !SETTLED.has(ticket.status))
         if (open.length === 0) continue
         gaps.push(gap({
           id: 'C1',
@@ -1026,7 +1145,7 @@ window.__ModuleLoader__.load({
 
       if (initiative.status !== null && SETTLED.has(initiative.status)) {
         const open = initiative.epics.flatMap((epic) =>
-          epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status)))
+          epic.tickets.filter((ticket) => !SETTLED.has(ticket.status)))
         if (open.length > 0) {
           gaps.push(gap({
             id: 'C2',
@@ -1182,15 +1301,18 @@ window.__ModuleLoader__.load({
         tryList(io, join(folder, 'tickets'), signal),
       ])
 
+      // Every markdown file in the folder: the store tells leaves from plans by
+      // their frontmatter, and a file name is not a reliable signal for that. A
+      // `*-plan.md` whose type is not a leaf type and which names no ticket is
+      // neither, and reading only the plans would hide that instead of reporting it.
       const names = listing
-        .filter((entry) => entry.type === 'file' && entry.name.endsWith(PLAN_SUFFIX))
+        .filter((entry) => entry.type === 'file' && entry.name.endsWith('.md'))
         .map((entry) => entry.name)
         .sort()
 
-      // A plan that the directory listing named and the reader could not open is a
-      // real problem -- it exists and its state is hidden -- so only this read is
-      // recorded when it fails.
-      const plans = await mapLimit(names, READ_CONCURRENCY, async (name) => {
+      // A file the directory listing named and the reader could not open is a real
+      // problem -- it exists and its state is hidden -- so this read is recorded.
+      const files = await mapLimit(names, READ_CONCURRENCY, async (name) => {
         const path = join(join(folder, 'tickets'), name)
         const text = await tryRead(io, path, signal)
         if (text === null) {
@@ -1200,7 +1322,7 @@ window.__ModuleLoader__.load({
         return { path, text }
       })
 
-      return { ...row, folder, ticket, storyIndex, plans: plans.filter(Boolean) }
+      return { ...row, folder, ticket, storyIndex, files: files.filter(Boolean) }
     }
 
     /**

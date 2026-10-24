@@ -12,31 +12,56 @@
  */
 
 import { readFrontmatter, stringOf } from './frontmatter.js'
-import { linkPlans, readEpicIndex, readPlan, readStoryIndex } from './store.js'
+import { classify, readLeaf, readPlan, readStoryIndex, slugify } from './store.js'
 
 /**
- * The published order of ticket states, oldest first.
+ * The store's own status-to-state table.
  *
- * These are the words BMAD v7 writes into a plan's `status`: the builds write
- * `draft` through `built`, an unattended run writes `blocked` when it halts, and
- * Sofia writes `done` or `dropped`. `in-progress` and `review` come from the PO
- * skill's own vocabulary and appear on real tickets, so they are carried too.
+ * Copied from `tickets.py` rather than invented, because the board's lanes have
+ * to be the lanes `tickets.py status` reports or the two disagree about the same
+ * repository. An empty status is **backlog**: a ticket exists in the index and
+ * nothing has happened to it, which is exactly how a planned story looks before
+ * `bmad-build` writes its plan. Reading that as "unknown" was this board getting
+ * it wrong -- a plan is an artefact of building, not a precondition of existing.
  */
-export const STATUS_ORDER = [
-  'blocked',
-  'in-progress',
-  'review',
-  'built',
-  'draft',
-  'done',
-  'dropped',
-]
+export const STATE_OF = {
+  '': 'backlog',
+  draft: 'backlog',
+  'ready-for-dev': 'backlog',
+  'in-progress': 'in-progress',
+  blocked: 'in-progress',
+  'in-review': 'review',
+  built: 'review',
+  done: 'done',
+  dropped: 'dropped',
+}
 
-/** States that mean the work is finished, whichever word was used. */
+/** The lane order, earliest first. */
+export const STATE_ORDER = ['backlog', 'in-progress', 'review', 'done', 'dropped']
+
+/** States that mean the work is finished. */
 export const SETTLED = new Set(['done', 'dropped'])
 
-/** The words the board recognises; anything else is reported as unrecognised. */
-export const KNOWN_STATUS = new Set(STATUS_ORDER)
+/** Every status word the store understands. */
+export const KNOWN_STATUS = new Set(Object.keys(STATE_OF))
+
+/** The lanes, plus the one for a word the store does not understand. */
+export const STATUS_ORDER = [...STATE_ORDER, 'unknown']
+
+/**
+ * Map a status word to the lane it belongs in.
+ *
+ * A word the store does not know becomes its own lane and a finding, rather than
+ * being guessed at: `tickets.py` treats an unrecognised status as blocked, and
+ * silently inheriting that would hide a broken ticket behind a normal one.
+ *
+ * @param {string} status - the word from the ticket.
+ * @returns {string} the lane.
+ */
+export function stateOf(status) {
+  const word = String(status ?? '')
+  return Object.hasOwn(STATE_OF, word) ? STATE_OF[word] : 'unknown'
+}
 
 /**
  * Turn a BMAD slug into something a reader can scan.
@@ -93,16 +118,17 @@ export function readEpicTicket(text) {
 /**
  * Decide a ticket's displayed state.
  *
- * A v7 story carries no status in `tickets.toml`; the state lives in its plan.
- * So a ticket whose plan is missing has an *unknown* state, not a default one,
- * and the board shows that rather than counting it as not started.
+ * A plan overrides its leaf, and a leaf overrides the index row. With neither,
+ * the ticket is backlog -- not unknown. The only way to be unknown is to carry a
+ * status word the store does not define.
  *
- * @param {object|null} plan - from {@link readPlan}, or null.
- * @returns {string|null} the status, or null when nothing declares one.
+ * @param {object|null} plan - the joined plan, or null.
+ * @param {object|null} leaf - the leaf file, or null.
+ * @returns {string} the lane.
  */
-export function ticketStatus(plan) {
-  if (plan === null || plan === undefined) return null
-  return plan.status
+export function ticketStatus(plan, leaf) {
+  const word = plan?.status ?? leaf?.status ?? ''
+  return stateOf(word)
 }
 
 /**
@@ -121,22 +147,69 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
   const built = epics.map((epic) => {
     const header = readEpicTicket(epic.ticket)
     const entries = readStoryIndex(epic.storyIndex)
-    const plans = (epic.plans ?? []).map((plan) => readPlan(plan.text, plan.path))
-    const { links, unlinked, orphans, missing } = linkPlans(entries, plans)
 
-    const tickets = entries.map((entry) => {
-      const plan = links.get(entry.id) ?? null
+    // The store decides what a file is by its frontmatter type, not its name:
+    // a leaf carries a ticket, a file with a `ticket` key is a plan over one,
+    // and anything else is ignored. Splitting on the file name instead is what
+    // made a folder of `*-plan.md` files invisible.
+    const leaves = []
+    const plans = []
+    const ignored = []
+    for (const file of epic.files ?? []) {
+      const role = classify(file.text)
+      if (role === 'leaf') leaves.push(readLeaf(file.text, file.path))
+      else if (role === 'plan') plans.push(readPlan(file.text, file.path))
+      else ignored.push(file.path)
+    }
+
+    const usedLeaves = new Set()
+    const usedPlans = new Set()
+
+    const build = (entry) => {
+      const leaf = leaves.find((l) => l.id !== null && l.id === entry.id
+        || l.path === `${entry.type}-${slugify(entry.title)}.md`) ?? null
+      if (leaf !== null) usedLeaves.add(leaf.path)
+      const plan = plans.find((pl) => pl.ticket === entry.id) ?? null
+      if (plan !== null) usedPlans.add(plan.path)
+      const word = plan?.status ?? leaf?.status ?? ''
       return {
         id: entry.id,
         ref: `${epic.id ?? '?'}.${entry.id}`,
         type: entry.type,
-        title: entry.title,
+        title: leaf?.title ?? entry.title,
         v6Key: entry.v6Key,
-        status: ticketStatus(plan),
+        word,
+        status: ticketStatus(plan, leaf),
         plan,
-        linkedBy: plan === null ? 'none' : plan.ticket === null ? 'name' : 'ticket',
+        leaf,
+        linkedBy: plan === null ? 'none' : 'ticket',
       }
-    })
+    }
+
+    const tickets = entries.map(build)
+
+    // A leaf the index does not list is still a ticket the store knows about.
+    for (const leaf of leaves) {
+      if (usedLeaves.has(leaf.path) || leaf.id === null) continue
+      if (entries.some((entry) => entry.id === leaf.id)) continue
+      const plan = plans.find((pl) => pl.ticket === leaf.id) ?? null
+      if (plan !== null) usedPlans.add(plan.path)
+      tickets.push({
+        id: leaf.id,
+        ref: `${epic.id ?? '?'}.${leaf.id}`,
+        type: leaf.type ?? 'story',
+        title: leaf.title ?? leaf.path,
+        v6Key: null,
+        word: plan?.status ?? leaf.status,
+        status: ticketStatus(plan, leaf),
+        plan,
+        leaf,
+        linkedBy: plan === null ? 'none' : 'ticket',
+        unlisted: true,
+      })
+    }
+
+    const orphans = plans.filter((pl) => !usedPlans.has(pl.path))
 
     return {
       id: epic.id,
@@ -146,8 +219,8 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
       status: header.status,
       tickets,
       orphans,
-      unlinked: unlinked.length,
-      missing: missing.map((entry) => entry.id),
+      ignored,
+      leaves: leaves.length,
     }
   })
 
@@ -157,10 +230,7 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
   for (const epic of built) {
     for (const ticket of epic.tickets) {
       total += 1
-      if (ticket.status === null) {
-        unknown += 1
-        continue
-      }
+      if (ticket.status === 'unknown') unknown += 1
       byStatus.set(ticket.status, (byStatus.get(ticket.status) ?? 0) + 1)
     }
   }
@@ -177,8 +247,8 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
       unknown,
       byStatus,
       settled: [...byStatus].filter(([status]) => SETTLED.has(status)).reduce((n, [, c]) => n + c, 0),
-      unlinkedPlans: built.reduce((n, epic) => n + epic.unlinked, 0),
       orphanPlans: built.reduce((n, epic) => n + epic.orphans.length, 0),
+      ignoredFiles: built.reduce((n, epic) => n + epic.ignored.length, 0),
     },
     unreadable,
   }
@@ -205,9 +275,8 @@ export function statusLanes(initiative) {
   }
 
   const rank = (status) => {
-    if (status === null) return STATUS_ORDER.length - 1
     const index = STATUS_ORDER.indexOf(status)
-    return index === -1 ? STATUS_ORDER.length - 2 : index
+    return index === -1 ? STATUS_ORDER.length - 1 : index
   }
 
   return [...groups]

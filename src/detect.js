@@ -16,7 +16,7 @@
  * @module dsh-plugin-bmad-sprint-board/detect
  */
 
-import { KNOWN_STATUS, SETTLED } from './model.js'
+import { SETTLED } from './model.js'
 
 /** How much a gap matters, highest first. */
 export const SEVERITY = ['high', 'medium', 'low']
@@ -52,44 +52,49 @@ export function detectInitiative(initiative) {
   const unverifiable = []
   const where = initiative.slug
 
-  // A plan the store does not link is invisible to `tickets.py`, which then
-  // reports the ticket as unstarted however finished the plan is. That is the
-  // single most misleading state a migrated project gets into, because every
+  // A ticket file the store cannot classify is invisible to `tickets.py`. The
+  // store tells leaves from plans by frontmatter type, so a `*-plan.md` whose
+  // type is not `story`/`spike`/`bug` and which names no ticket is neither --
+  // its ticket then reports as backlog however finished the work is. Every
   // number the tooling prints is wrong while every file on disk looks correct.
-  if (initiative.counts.unlinkedPlans > 0) {
-    const example = initiative.epics.find((epic) => epic.unlinked > 0)
+  const ignored = initiative.epics.flatMap((epic) =>
+    epic.ignored.map((path) => ({ epic, path })))
+  if (ignored.length > 0) {
+    const example = ignored[0]
     gaps.push(gap({
       id: 'L1',
-      title: 'plans not linked in the ticket store',
+      title: 'ticket files the store cannot read',
       severity: 'high',
       subject: where,
       subjectKind: 'initiative',
       evidence:
-        `${initiative.counts.unlinkedPlans} plan file(s) match a ticket by name, but no entry `
-        + `declares them with a ticket key -- so the store reports them as unstarted.`,
+        `${ignored.length} file(s) in a ticket folder are neither a leaf ticket nor a plan, `
+        + `so the store ignores them and reports their tickets as backlog.`,
       action: ask(
-        `In ${where}, the ticket store does not link ${initiative.counts.unlinkedPlans} plan file(s) `
-        + `to their entries. Add the entry id to each plan's frontmatter as \`ticket:\` `
-        + `(start with ${example?.folder ?? where}), then re-run \`tickets.py status\`.`,
+        `In ${where}, ${ignored.length} ticket file(s) are invisible to the store: `
+        + `${example.path} and others. Each needs \`type: story\` (or spike/bug) to be a leaf, `
+        + `or a \`ticket: <id>\` key to be a plan. Then re-run \`tickets.py status\`.`,
       ),
     }))
   }
 
-  // An entry with no plan at all: the ticket exists in the index and nowhere
-  // else. Whether that means "not started" or "the plan is missing" cannot be
-  // told from the store, so it is reported as unverifiable rather than counted.
-  const noPlan = initiative.epics.flatMap((epic) =>
-    epic.tickets.filter((ticket) => ticket.plan === null).map((ticket) => ({ epic, ticket })))
-  if (noPlan.length > 0) {
-    unverifiable.push({
+  // A leaf the index does not list is a ticket the store knows and the plan does
+  // not, which is the inverse of an orphan: work exists that nothing schedules.
+  const unlisted = initiative.epics.flatMap((epic) =>
+    epic.tickets.filter((ticket) => ticket.unlisted === true).map((ticket) => ({ epic, ticket })))
+  if (unlisted.length > 0) {
+    gaps.push(gap({
       id: 'L2',
-      title: 'tickets with no plan file',
+      title: 'ticket files no index entry lists',
+      severity: 'medium',
       subject: where,
       subjectKind: 'initiative',
-      evidence: `${noPlan.length} ticket(s) have an index entry but no plan, so their state is unknown.`,
-      tickets: noPlan.map(({ ticket }) => ticket.ref),
-      action: ask(`Which of these are unstarted and which have a missing plan? ${noPlan.map(({ ticket }) => ticket.ref).join(', ')}`),
-    })
+      evidence: `${unlisted.length} leaf ticket(s) exist on disk with no entry in any ticket index.`,
+      action: ask(
+        `These tickets in ${where} have a file but no index entry: `
+        + `${unlisted.map(({ ticket }) => ticket.ref).join(', ')}. Add the entry or remove the file.`,
+      ),
+    }))
   }
 
   // A plan file nothing claims is either a renamed ticket or leftover work.
@@ -115,7 +120,7 @@ export function detectInitiative(initiative) {
   // starts lying.
   const odd = initiative.epics.flatMap((epic) =>
     epic.tickets
-      .filter((ticket) => ticket.status !== null && !KNOWN_STATUS.has(ticket.status))
+      .filter((ticket) => ticket.status === 'unknown')
       .map((ticket) => ({ epic, ticket })))
   if (odd.length > 0) {
     unverifiable.push({
@@ -124,8 +129,8 @@ export function detectInitiative(initiative) {
       subject: where,
       subjectKind: 'initiative',
       evidence: `${odd.length} ticket(s) carry a status this board does not recognise, so they are not counted either way.`,
-      tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.status})`),
-      action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.status}`).join(', ')}. Confirm what they mean.`),
+      tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.word})`),
+      action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.word}`).join(', ')}. Confirm what they mean.`),
     })
   }
 
@@ -133,7 +138,7 @@ export function detectInitiative(initiative) {
   // migration artefact: the folder was closed, the work inside it was not.
   for (const epic of initiative.epics) {
     if (epic.status === null || !SETTLED.has(epic.status)) continue
-    const open = epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status))
+    const open = epic.tickets.filter((ticket) => !SETTLED.has(ticket.status))
     if (open.length === 0) continue
     gaps.push(gap({
       id: 'C1',
@@ -151,7 +156,7 @@ export function detectInitiative(initiative) {
 
   if (initiative.status !== null && SETTLED.has(initiative.status)) {
     const open = initiative.epics.flatMap((epic) =>
-      epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status)))
+      epic.tickets.filter((ticket) => !SETTLED.has(ticket.status)))
     if (open.length > 0) {
       gaps.push(gap({
         id: 'C2',

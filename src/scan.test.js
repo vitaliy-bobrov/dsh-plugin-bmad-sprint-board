@@ -64,7 +64,9 @@ const V7 = {
   '_bmad-output/initiative-x/tickets/tickets.toml': '[[epic]]\nid = 1\nslug = "epic-a"\ntitle = "Epic A"\n',
   '_bmad-output/initiative-x/tickets/epic-a/epic-a.md': "---\ntype: epic\ntitle: 'Epic A'\nparent: x\nstatus: 'in-progress'\n---\n",
   '_bmad-output/initiative-x/tickets/epic-a/tickets/tickets.toml': '[[entry]]\nid = "1"\ntype = "story"\ntitle = "Only ticket"\n',
-  '_bmad-output/initiative-x/tickets/epic-a/tickets/story-only-ticket-plan.md': "---\ntitle: 'Only ticket'\ntype: story\nstatus: 'done'\nticket: '1'\n---\n",
+  // a leaf: the ticket itself, named the way BMAD names one and typed as the
+  // store requires, with its id matching the index entry
+  '_bmad-output/initiative-x/tickets/epic-a/tickets/story-only-ticket.md': "---\nid: '1'\ntitle: 'Only ticket'\ntype: story\nstatus: 'done'\n---\n",
 }
 
 test('a v7 project is recognised and read into initiatives', async () => {
@@ -116,19 +118,19 @@ test('an initiative with no epic index is empty, not unreadable', async () => {
 
 test('a listed plan that cannot be read is reported', async () => {
   const files = { ...V7 }
-  delete files['_bmad-output/initiative-x/tickets/epic-a/tickets/story-only-ticket-plan.md']
+  delete files['_bmad-output/initiative-x/tickets/epic-a/tickets/story-only-ticket.md']
   // The listing still names the file, because dirs are derived from files: so
   // add a sibling probe by listing the directory directly.
   const io = face(files)
   const list = io.list
   io.list = async (path, signal) => (
     path.endsWith('epic-a/tickets')
-      ? [...(await list(path, signal)), { name: 'story-ghost-plan.md', type: 'file' }]
+      ? [...(await list(path, signal)), { name: 'story-ghost.md', type: 'file' }]
       : list(path, signal)
   )
   const result = await scanProject(io)
   assert.equal(result.unreadable.length, 1)
-  assert.match(result.unreadable[0].path, /story-ghost-plan\.md/)
+  assert.match(result.unreadable[0].path, /story-ghost\.md/)
 })
 
 test('mapLimit keeps input order and never exceeds the limit', async () => {
