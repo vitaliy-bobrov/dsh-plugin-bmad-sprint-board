@@ -3,8 +3,8 @@
  *
  * Contributes one page-type tab to the Session's right Sidebar (the column that
  * already holds Chat, Guide, Files and Terminal) and one guide entry that opens
- * it. The board is strictly read-only: it reads three workspace files through
- * the Host `workspaceFiles` Remote face and never writes to them.
+ * it. The board is strictly read-only: it reads the project through the Host
+ * `workspaceFiles` Remote face and never writes to it.
  *
  * @module dsh-plugin-bmad-sprint-board/client
  */
@@ -22,14 +22,4 @@ window.__ModuleLoader__.load({
     /** Page kind the guide entry opens. */
     const TAB_KIND = 'bmad-sprint-board';
     /** Command id of the keybinding that opens the board. */
-    /**
-     * How many file reads the loader keeps in flight.
-     *
-     * The reads are round-trips to the Host's workspace face. All of them at
-     * once would be quickest and would also hand the far side thirty
-     * simultaneous requests for a board that refreshes on a click; eight keeps
-     * the wait short without turning a refresh into a burst.
-     */
-    const READ_CONCURRENCY = 8;
-
     const BOARD_COMMAND = 'bmad.sprint-board';

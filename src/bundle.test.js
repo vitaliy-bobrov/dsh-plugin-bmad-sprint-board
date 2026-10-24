@@ -117,32 +117,3 @@ test('every declaration a source module exports survives into the bundle', () =>
   assert.ok(declared.size > 20, `found modules to check (${declared.size} declarations)`)
 })
 
-test('analyse returns one key per thing it produces', () => {
-  // `requirements` was used twice in the same object literal: once for the
-  // summary bar and once for the requirements view. JavaScript allows it, the
-  // last one wins, and the view silently became the bar -- so the pane read
-  // `lanes` off an object that has none and the tab crashed on open. Nothing
-  // caught it, because nothing looked at the shape of what analyse returns.
-  const dir = new URL('./', import.meta.url)
-  const text = readFileSync(new URL('analyse.js', dir), 'utf8')
-  const body = text.slice(text.indexOf('  return {'), text.lastIndexOf('}'))
-  const keys = [...body.matchAll(/^\s{4}([A-Za-z_$][\w$]*)\s*[,:]/gm)].map((m) => m[1])
-  const duplicates = keys.filter((key, i) => keys.indexOf(key) !== i)
-  assert.deepEqual(duplicates, [], `duplicate keys: ${duplicates.join(', ')}`)
-  assert.ok(keys.includes('requirementView'), 'the view is returned under its own key')
-})
-
-test('analyse returns one key per thing it produces', () => {
-  // `requirements` was used twice in the same object literal: once for the
-  // summary bar and once for the requirements view. JavaScript allows it, the
-  // last one wins, and the view silently became the bar -- so the pane read
-  // `lanes` off an object that has none and the tab crashed on open. Nothing
-  // caught it, because nothing looked at the shape of what analyse returns.
-  const dir = new URL('./', import.meta.url)
-  const text = readFileSync(new URL('analyse.js', dir), 'utf8')
-  const body = text.slice(text.indexOf('  return {'), text.lastIndexOf('}'))
-  const keys = [...body.matchAll(/^\s{4}([A-Za-z_$][\w$]*)\s*[,:]/gm)].map((m) => m[1])
-  const duplicates = keys.filter((key, i) => keys.indexOf(key) !== i)
-  assert.deepEqual(duplicates, [], `duplicate keys: ${duplicates.join(', ')}`)
-  assert.ok(keys.includes('requirementView'), 'the view is returned under its own key')
-})

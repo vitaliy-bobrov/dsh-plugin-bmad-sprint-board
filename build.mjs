@@ -46,26 +46,26 @@ const banner = `/**
  * entry that opens it. The board is strictly read-only: it reads workspace
  * files through the Host \`workspaceFiles\` Remote face and never writes.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/client
+ * @module dsh-plugin-bmad-sprint-board/client
  */
 
 `
 
-// The core modules are inlined in dependency order: core defines the model,
-// plan and detect build on it. `index.js` is the Node-facing entry and is not
-// inlined -- the shell calls the same functions directly.
+// The core modules are inlined in dependency order: the two parsers feed the
+// config, the config feeds the store, the store and the model feed the detectors
+// and the scan. `index.js` is the Node-facing entry and is not inlined -- the
+// shell calls the same functions directly.
 const pieces = [
   banner,
   read('shell-head.js'),
   read('shell-pre.js'),
-  inline(read('core.js')),
+  inline(read('toml.js')),
+  inline(read('frontmatter.js')),
   inline(read('config.js')),
+  inline(read('store.js')),
+  inline(read('model.js')),
   inline(read('detect.js')),
-  inline(read('plan.js')),
-  inline(read('ux.js')),
-  inline(read('requirements.js')),
-  inline(read('planning.js')),
-  inline(read('analyse.js')),
+  inline(read('scan.js')),
   read('shell-post.js'),
 ]
 const built = pieces.join('\n')

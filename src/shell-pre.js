@@ -13,13 +13,6 @@
     * `state-business-primary` is the theme's real blue in both themes, and it
     * keeps the ramp inside one family of `state-*` aliases.
     */
-    const STATUS_TOKEN = {
-    backlog: '--dsw-alias-state-idle-primary',
-    'ready-for-dev': '--dsw-alias-label-secondary',
-    'in-progress': '--dsw-alias-state-business-primary',
-    review: '--dsw-alias-state-warn-primary',
-    done: '--dsw-alias-state-success-primary',
-    };
     const IDLE_TOKEN = '--dsw-alias-state-idle-primary';
     /** The token a lane uses when its contents want attention rather than praise. */
     const WARN_TOKEN = '--dsw-alias-state-warn-primary';

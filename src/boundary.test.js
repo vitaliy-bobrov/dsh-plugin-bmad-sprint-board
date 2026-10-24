@@ -16,7 +16,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 
-const PURE_MODULES = ['core.js', 'detect.js', 'plan.js', 'config.js', 'analyse.js']
+const PURE_MODULES = ['toml.js', 'frontmatter.js', 'config.js', 'store.js', 'model.js', 'detect.js', 'scan.js']
 const raw = PURE_MODULES.map((f) => readFileSync(new URL(`./${f}`, import.meta.url), 'utf8')).join('\n')
 
 /** Remove block and line comments, so prose cannot trip a rule. */
@@ -27,7 +27,6 @@ const strip = (s) =>
     .replace(/^\s*\*.*$/gm, '')
 
 const code = strip(raw)
-const coreOnly = strip(readFileSync(new URL('./core.js', import.meta.url), 'utf8'))
 
 const FORBIDDEN = [
   [/\bctx\b/, 'Cordis context'],
@@ -47,7 +46,7 @@ const FORBIDDEN = [
 
 test('every pure module is free of DSH, Cordis, React and the DOM', () => {
   const found = FORBIDDEN.filter(([re]) => re.test(code)).map(([, name]) => name)
-  assert.deepEqual(found, [], `core.js must stay host-independent; found: ${found.join(', ')}`)
+  assert.deepEqual(found, [], `the pure modules must stay host-independent; found: ${found.join(', ')}`)
 })
 
 test('the core is ESM with named exports', () => {
@@ -58,7 +57,7 @@ test('the core is ESM with named exports', () => {
 test('host-specific concerns live in the shell, not the core', () => {
   // the palette and the addressing scheme were carved into the shell
   const shellPre = readFileSync(new URL('./shell-pre.js', import.meta.url), 'utf8')
-  for (const needle of ['STATUS_TOKEN', 'IDLE_TOKEN', 'FILE_ADDRESS_PREFIX', 'sessionFileAddress']) {
+  for (const needle of ['IDLE_TOKEN', 'FILE_ADDRESS_PREFIX', 'sessionFileAddress']) {
     assert.ok(shellPre.includes(needle), `${needle} belongs to the shell`)
     assert.ok(!raw.includes(needle), `${needle} must not be in the core`)
   }

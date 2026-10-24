@@ -1,198 +1,194 @@
 /**
- * Detectors -- the gaps board's whole reason to exist.
+ * v7 checks: what the ticket store and the tickets on disk disagree about.
  *
- * Every detector is a pure function over the model plus whatever file content
- * the shell has already read. Two rules hold throughout:
+ * The v6 detectors compared a sprint file against deferred work and review
+ * patches. v7 has no sprint file; the equivalents are the two records every
+ * ticket keeps -- the entry in `tickets.toml` and the plan file beside it -- and
+ * the statuses its containers claim.
  *
- *   1. **Risks are derived.** Nothing here is written back, so nothing here can
- *      be silently overwritten by the framework's own writer.
+ * Two rules carry over from v6 unchanged:
+ *
+ *   1. **Nothing here writes.** The board is a reader.
  *   2. **Unverifiable is not clean.** A check that could not be evaluated
- *      returns an `unverifiable` entry rather than nothing, because a board
- *      showing nothing must never be confusable with a board that cannot see.
+ *      returns an entry rather than nothing, because a board showing nothing
+ *      must never be confusable with a board that cannot see.
  *
  * @module dsh-plugin-bmad-sprint-board/detect
  */
 
-/** Severity vocabulary, borrowed from bmad-loop's deferred ledger. */
-export const SEVERITY = ['critical', 'high', 'medium', 'low']
+import { KNOWN_STATUS, SETTLED } from './model.js'
+
+/** How much a gap matters, highest first. */
+export const SEVERITY = ['high', 'medium', 'low']
 
 /**
- * A gap: something the evidence contradicts.
- * @typedef {object} Gap
- * @property {string} id - detector id, e.g. `B1`
- * @property {string} title - what kind of problem this is
- * @property {string} severity - one of {@link SEVERITY}
- * @property {string} subject - the key the reader recognises, e.g. a story key
- * @property {string} subjectKind - `story` | `epic` | `requirement` | `area`
- * @property {string} evidence - what was observed, in one sentence
- * @property {object} action - what to do about it
- * @property {string} action.kind - `command` | `prompt` | `open`
- * @property {string} action.label - the button's words
- * @property {string} action.payload - the string to copy, or the path to open
+ * Build one gap in the shape every view renders.
+ *
+ * @param {object} spec - the gap's fields.
+ * @returns {object} the gap.
  */
+function gap({ id, title, severity, subject, subjectKind, evidence, action }) {
+  return { id, title, severity, subject, subjectKind, evidence, action }
+}
 
 /**
- * A check that could not be evaluated. Never rendered as clean.
- * @typedef {object} Unverifiable
- * @property {string} id - detector id
- * @property {string} subject - what could not be checked
- * @property {string} reason - why, naming the artefact that was missing or unreadable
- * @property {object} action - the prompt that would find out
+ * A prompt that hands the finding back to the agent that owns the store.
+ *
+ * @param {string} text - the instruction.
+ * @returns {{kind: string, label: string, payload: string}} the action.
  */
-
-const storyLabel = (story) => story.key
+function ask(text) {
+  return { kind: 'prompt', label: 'Ask agent', payload: text }
+}
 
 /**
- * **B1 -- done but owing.** A story is `done` while deferred entries still name
- * its spec. Deferred work is, by definition, work that was *not* done, so the
- * tracking file asserts a completeness the evidence contradicts.
+ * Check one initiative against its tickets.
  *
- * Fires on real data: story 3-2 in the reference repo.
- *
- * @param {object} model - the model from `buildModel`.
- * A deferral that attributes to no story is *not* claimed here -- an unattributed
- * entry is the orphan-deferred detector's business, and guessing which story owns
- * it would be exactly the silent wrongness this board exists to catch.
- *
- * @returns {{gaps: Gap[], unverifiable: Unverifiable[]}}
+ * @param {object} initiative - from `buildInitiative`.
+ * @returns {{gaps: Array<object>, unverifiable: Array<object>}} what disagrees.
  */
-export function detectDoneButOwing(model) {
+export function detectInitiative(initiative) {
   const gaps = []
   const unverifiable = []
+  const where = initiative.slug
 
-  for (const story of model.stories) {
-    if (story.status !== 'done') continue
-    // `linkDeferredToStories` attaches the story OBJECT, not its key
-    const owed = (model.deferred ?? []).filter((item) => item.story?.key === story.key)
-    if (owed.length === 0) continue
-
-    gaps.push({
-      id: 'B1',
-      title: 'done but owing',
+  // A plan the store does not link is invisible to `tickets.py`, which then
+  // reports the ticket as unstarted however finished the plan is. That is the
+  // single most misleading state a migrated project gets into, because every
+  // number the tooling prints is wrong while every file on disk looks correct.
+  if (initiative.counts.unlinkedPlans > 0) {
+    const example = initiative.epics.find((epic) => epic.unlinked > 0)
+    gaps.push(gap({
+      id: 'L1',
+      title: 'plans not linked in the ticket store',
       severity: 'high',
-      subject: story.key,
-      subjectKind: 'story',
+      subject: where,
+      subjectKind: 'initiative',
       evidence:
-        `marked done, yet ${owed.length} deferred entr${owed.length === 1 ? 'y' : 'ies'} ` +
-        `still name${owed.length === 1 ? 's' : ''} this story's spec`,
-      action: {
-        kind: 'command',
-        label: 'Decide the deferrals',
-        payload: `/bmad-correct-course -- story ${story.key} is done with ${owed.length} open deferral(s)`,
-      },
+        `${initiative.counts.unlinkedPlans} plan file(s) match a ticket by name, but no entry `
+        + `declares them with a ticket key -- so the store reports them as unstarted.`,
+      action: ask(
+        `In ${where}, the ticket store does not link ${initiative.counts.unlinkedPlans} plan file(s) `
+        + `to their entries. Add the entry id to each plan's frontmatter as \`ticket:\` `
+        + `(start with ${example?.folder ?? where}), then re-run \`tickets.py status\`.`,
+      ),
+    }))
+  }
+
+  // An entry with no plan at all: the ticket exists in the index and nowhere
+  // else. Whether that means "not started" or "the plan is missing" cannot be
+  // told from the store, so it is reported as unverifiable rather than counted.
+  const noPlan = initiative.epics.flatMap((epic) =>
+    epic.tickets.filter((ticket) => ticket.plan === null).map((ticket) => ({ epic, ticket })))
+  if (noPlan.length > 0) {
+    unverifiable.push({
+      id: 'L2',
+      title: 'tickets with no plan file',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence: `${noPlan.length} ticket(s) have an index entry but no plan, so their state is unknown.`,
+      tickets: noPlan.map(({ ticket }) => ticket.ref),
+      action: ask(`Which of these are unstarted and which have a missing plan? ${noPlan.map(({ ticket }) => ticket.ref).join(', ')}`),
     })
+  }
+
+  // A plan file nothing claims is either a renamed ticket or leftover work.
+  const orphans = initiative.epics.flatMap((epic) =>
+    epic.orphans.map((plan) => ({ epic, plan })))
+  if (orphans.length > 0) {
+    gaps.push(gap({
+      id: 'L3',
+      title: 'plans no ticket claims',
+      severity: 'medium',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence: `${orphans.length} plan file(s) correspond to no entry in any ticket index.`,
+      action: ask(
+        `These plan files in ${where} belong to no ticket index entry: `
+        + `${orphans.map(({ plan }) => plan.path).join(', ')}. Add the ticket or delete the file.`,
+      ),
+    }))
+  }
+
+  // A status word the board does not know is shown, but never counted as
+  // settled: guessing that an unfamiliar word means finished is how a board
+  // starts lying.
+  const odd = initiative.epics.flatMap((epic) =>
+    epic.tickets
+      .filter((ticket) => ticket.status !== null && !KNOWN_STATUS.has(ticket.status))
+      .map((ticket) => ({ epic, ticket })))
+  if (odd.length > 0) {
+    unverifiable.push({
+      id: 'L4',
+      title: 'unrecognised status words',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence: `${odd.length} ticket(s) carry a status this board does not recognise, so they are not counted either way.`,
+      tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.status})`),
+      action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.status}`).join(', ')}. Confirm what they mean.`),
+    })
+  }
+
+  // A container whose status is settled while its tickets are not is the classic
+  // migration artefact: the folder was closed, the work inside it was not.
+  for (const epic of initiative.epics) {
+    if (epic.status === null || !SETTLED.has(epic.status)) continue
+    const open = epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status))
+    if (open.length === 0) continue
+    gaps.push(gap({
+      id: 'C1',
+      title: 'epic settled with open tickets',
+      severity: 'high',
+      subject: epic.slug,
+      subjectKind: 'epic',
+      evidence: `the epic says ${epic.status}, but ${open.length} of its tickets are not settled.`,
+      action: ask(
+        `Epic ${epic.slug} is marked ${epic.status} while ${open.map((t) => t.ref).join(', ')} `
+        + `are not settled. Reopen the epic or close those tickets.`,
+      ),
+    }))
+  }
+
+  if (initiative.status !== null && SETTLED.has(initiative.status)) {
+    const open = initiative.epics.flatMap((epic) =>
+      epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status)))
+    if (open.length > 0) {
+      gaps.push(gap({
+        id: 'C2',
+        title: 'initiative settled with open tickets',
+        severity: 'high',
+        subject: where,
+        subjectKind: 'initiative',
+        evidence: `the initiative says ${initiative.status}, but ${open.length} tickets inside it are not settled.`,
+        action: ask(
+          `Initiative ${where} is marked ${initiative.status} while ${open.length} tickets are open. `
+          + `Reopen it or settle the tickets.`,
+        ),
+      }))
+    }
   }
 
   return { gaps, unverifiable }
 }
 
 /**
- * **B3 -- review patches never applied.** A story is `done` while unticked
- * `[Review][Patch]` checkboxes remain in its file. Those are findings a review
- * triaged into work and nobody did.
+ * Check an initiative that declares no epics.
  *
- * This began as a loose proxy for "a stage was skipped" and inspection made it a
- * rule: story 1-5 in the reference repo carries exactly two, while story 3-2 has
- * 53 checkboxes and none unticked. So the tag is the signal -- not unticked boxes
- * in general, which would flag every optional task anyone ever skipped.
- *
- * @param {object} model - the model from `buildModel`.
- * @param {(path: string) => string|null|undefined} readStory - story-file text,
- *   `null` when the file is known unreadable, `undefined` when not fetched.
- * @returns {{gaps: Gap[], unverifiable: Unverifiable[]}}
+ * @param {object} initiative - from `buildInitiative`.
+ * @returns {object|null} the gap, or null when the initiative has work.
  */
-export function detectReviewPatches(model, readStory) {
-  const gaps = []
-  const unverifiable = []
-  const PATTERN = /^\s*- \[ \]\s*\[Review\]\[Patch\]\s*(.*)$/
-
-  for (const story of model.stories) {
-    if (story.status !== 'done') continue
-    if (story.file === null) {
-      unverifiable.push({
-        id: 'B3',
-        subject: story.key,
-        reason: 'no story file resolves for this key, so its review state cannot be read',
-        action: {
-          kind: 'prompt',
-          label: 'Find the missing story file',
-          payload:
-            `/bmad-sprint-planning -- story ${story.key} is marked done but no story file resolves for it under the ` +
-            'declared story_location. Find out whether the file was never created, was renamed, ' +
-            'or lives elsewhere, and tell me which.',
-        },
-      })
-      continue
-    }
-
-    const text = readStory(story.file)
-    if (text === null || text === undefined) {
-      unverifiable.push({
-        id: 'B3',
-        subject: story.key,
-        reason: `${story.file} could not be read`,
-        action: {
-          kind: 'prompt',
-          label: 'Investigate the unreadable story file',
-          payload:
-            `/bmad-sprint-planning -- I cannot read ${story.file} (story ${story.key}, marked done), so I cannot tell ` +
-            'whether its review findings were applied. Find out why it is unreadable and what ' +
-            'its review state actually is.',
-        },
-      })
-      continue
-    }
-
-    const pending = text
-      .split('\n')
-      .map((line) => PATTERN.exec(line))
-      .filter((m) => m !== null)
-      .map((m) => m[1].replace(/\s*\[[^\]]*\]\s*$/, '').trim())
-
-    if (pending.length === 0) continue
-
-    gaps.push({
-      id: 'B3',
-      title: 'review patches never applied',
-      severity: 'high',
-      subject: story.key,
-      subjectKind: 'story',
-      // Phrased like B1's: what was observed, in one sentence, without naming a
-      // single item out of several. A slice of the first one read as a truncation
-      // mid-word and told the reader less than the count does.
-      evidence:
-        `marked done, yet ${pending.length} unticked entr` +
-        `${pending.length === 1 ? 'y' : 'ies'} in the spec`,
-      action: {
-        kind: 'command',
-        label: 'Apply or reject the patches',
-        payload:
-          `/bmad-code-review -- ${pending.length} [Review][Patch] item(s) triaged on ` +
-          `${story.key} were never applied`,
-      },
-    })
-  }
-
-  return { gaps, unverifiable }
-}
-
-/**
- * Run every detector and merge the results, worst first.
- *
- * @param {object} model - the model from `buildModel`.
- * @param {object} [files] - content the shell has already read.
- * @param {(path: string) => string|null|undefined} [files.readStory] - story-file reader.
- * @returns {{gaps: Gap[], unverifiable: Unverifiable[]}}
- */
-export function detect(model, files = {}) {
-  const readStory = files.readStory ?? (() => undefined)
-
-  const results = [detectDoneButOwing(model), detectReviewPatches(model, readStory)]
-
-  const gaps = results.flatMap((r) => r.gaps)
-  const unverifiable = results.flatMap((r) => r.unverifiable)
-  const rank = (s) => SEVERITY.indexOf(s)
-
-  gaps.sort((a, b) => rank(a.severity) - rank(b.severity) || a.subject.localeCompare(b.subject))
-  return { gaps, unverifiable }
+export function detectEmptyInitiative(initiative) {
+  if (initiative.counts.epics > 0) return null
+  return gap({
+    id: 'E1',
+    title: 'initiative declares no epics',
+    severity: 'low',
+    subject: initiative.slug,
+    subjectKind: 'initiative',
+    evidence: 'the initiative folder exists and its ticket store lists no epics.',
+    action: ask(
+      `Initiative ${initiative.slug} has no epics in its ticket store. Either it has not been sliced `
+      + `yet, or it is finished and can be archived.`,
+    ),
+  })
 }

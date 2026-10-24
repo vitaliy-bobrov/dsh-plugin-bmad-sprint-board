@@ -1,17 +1,32 @@
 /**
- * BMAD configuration -- where the modules say their artefacts live.
+ * BMAD v7 configuration -- where output lives, and which initiative is in use.
  *
- * BMAD lets a project move its output folders, so a board that assumes a layout
- * is wrong the moment someone changes one. `_bmad/config.toml` declares the real
- * paths per module, and that declaration is the primary mechanism: the
- * conventional-candidate probe and the bounded scan stay, but only as the
- * fallback for when config is absent or silent.
+ * v7 replaced the per-module artefact declarations with two central keys:
+ * `core.output_folder` and `core.active_initiative`. BMAD resolves them by
+ * merging three TOML layers lowest priority first --
+ *
+ *   _bmad/config.toml
+ *   _bmad/custom/config.toml        team overrides, committed
+ *   _bmad/custom/config.user.toml   personal overrides, usually not committed
+ *
+ * -- which is exactly what `_bmad/scripts/resolve_config.py` does. This mirrors
+ * that merge so the board agrees with the tooling rather than guessing at a
+ * layout.
  *
  * @module dsh-plugin-bmad-sprint-board/config
  */
 
+import { mergeLayers, parseToml, pick } from './toml.js'
+
 /** The token BMAD writes where the project root belongs. */
 const PROJECT_ROOT = /\{project-root\}\/?/g
+
+/** The three layers, in merge order. */
+export const CONFIG_LAYERS = [
+  '_bmad/config.toml',
+  '_bmad/custom/config.toml',
+  '_bmad/custom/config.user.toml',
+]
 
 /**
  * Reduce a config value to a workspace-relative path.
@@ -28,58 +43,46 @@ export function resolveProjectPath(value) {
 }
 
 /**
- * Parse the module sections of a `config.toml`.
+ * Merge the config layers and read the two keys the board needs.
  *
- * A deliberately small reader, not a TOML implementation: BMAD's config is flat
- * `[modules.<name>]` tables of string values, and a full parser would be a
- * dependency the bundle does not have. Anything it cannot understand it skips --
- * a path it fails to read becomes a missing declaration, never a wrong one.
- *
- * @param {string} text - the contents of `_bmad/config.toml`.
- * @returns {Map<string, Map<string, string>>} module name -> key -> value.
+ * @param {Array<string|null>} texts - the contents of {@link CONFIG_LAYERS}, in order; null when a file is absent.
+ * @returns {{outputFolder: string|null, activeInitiative: string|null, layers: number}} the resolved settings.
  */
-export function parseBmadConfig(text) {
-  const modules = new Map()
-  let current = null
-
-  for (const raw of String(text).split('\n')) {
-    const line = raw.replace(/#.*$/, '').trim()
-    if (line === '') continue
-
-    const section = /^\[modules\.([A-Za-z0-9_-]+)\]$/.exec(line)
-    if (section !== null) {
-      current = new Map()
-      modules.set(section[1], current)
-      continue
-    }
-    if (/^\[/.test(line)) {
-      current = null
-      continue
-    }
-    if (current === null) continue
-
-    const entry = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$/.exec(line)
-    if (entry !== null) current.set(entry[1], entry[2])
+export function resolveConfig(texts) {
+  const layers = []
+  let seen = 0
+  for (const text of texts) {
+    if (typeof text !== 'string') continue
+    layers.push(parseToml(text))
+    seen += 1
   }
+  const merged = mergeLayers(layers)
 
-  return modules
+  const folder = pick(merged, 'core.output_folder')
+  const active = pick(merged, 'core.active_initiative')
+
+  return {
+    outputFolder: typeof folder === 'string' && folder !== '' ? resolveProjectPath(folder) : null,
+    activeInitiative: typeof active === 'string' && active !== '' ? active.replace(/\/+$/, '') : null,
+    layers: seen,
+  }
 }
 
 /**
- * The artefact locations the board reads, in the order it needs them.
+ * Recognise a BMAD installation and which major version it is.
  *
- * @param {Map<string, Map<string, string>>} modules - from {@link parseBmadConfig}.
- * @returns {{implementation: string|null, planning: string|null, knowledge: string|null}} workspace-relative paths, or null when undeclared.
+ * The two versions keep different central state: v7 declares `core.output_folder`
+ * and work lives in `initiative-*` folders, while v6 declared per-module artefact
+ * paths and tracked work in `sprint-status.yaml`. The board supports v7 only, so
+ * telling a v6 project what it is beats rendering a v7 board over v6 files and
+ * showing an empty one.
+ *
+ * @param {{config: {outputFolder: string|null}, hasSprintStatus: boolean, initiatives: number}} probe - what was found on disk.
+ * @returns {'v7'|'v6'|'none'} the detected version.
  */
-export function artifactPaths(modules) {
-  const bmm = modules.get('bmm') ?? new Map()
-  const pick = (key) => {
-    const value = bmm.get(key)
-    return value === undefined || value === '' ? null : resolveProjectPath(value)
-  }
-  return {
-    implementation: pick('implementation_artifacts'),
-    planning: pick('planning_artifacts'),
-    knowledge: pick('project_knowledge'),
-  }
+export function detectedVersion(probe) {
+  if (probe.config.outputFolder !== null && probe.initiatives > 0) return 'v7'
+  if (probe.hasSprintStatus) return 'v6'
+  if (probe.config.outputFolder !== null) return 'v7'
+  return 'none'
 }

@@ -9,7 +9,7 @@
  * entry that opens it. The board is strictly read-only: it reads workspace
  * files through the Host `workspaceFiles` Remote face and never writes.
  *
- * @module @local/dsh-plugin-bmad-sprint-board/client
+ * @module dsh-plugin-bmad-sprint-board/client
  */
 
 
@@ -18,8 +18,8 @@
  *
  * Contributes one page-type tab to the Session's right Sidebar (the column that
  * already holds Chat, Guide, Files and Terminal) and one guide entry that opens
- * it. The board is strictly read-only: it reads three workspace files through
- * the Host `workspaceFiles` Remote face and never writes to them.
+ * it. The board is strictly read-only: it reads the project through the Host
+ * `workspaceFiles` Remote face and never writes to it.
  *
  * @module dsh-plugin-bmad-sprint-board/client
  */
@@ -37,16 +37,6 @@ window.__ModuleLoader__.load({
     /** Page kind the guide entry opens. */
     const TAB_KIND = 'bmad-sprint-board';
     /** Command id of the keybinding that opens the board. */
-    /**
-     * How many file reads the loader keeps in flight.
-     *
-     * The reads are round-trips to the Host's workspace face. All of them at
-     * once would be quickest and would also hand the far side thirty
-     * simultaneous requests for a board that refreshes on a click; eight keeps
-     * the wait short without turning a refresh into a burst.
-     */
-    const READ_CONCURRENCY = 8;
-
     const BOARD_COMMAND = 'bmad.sprint-board';
     // --- Host-specific: theme palette and file addressing ---
     // Carved out of the core so it never names a DSH token or URI scheme.
@@ -63,13 +53,6 @@ window.__ModuleLoader__.load({
     * `state-business-primary` is the theme's real blue in both themes, and it
     * keeps the ramp inside one family of `state-*` aliases.
     */
-    const STATUS_TOKEN = {
-    backlog: '--dsw-alias-state-idle-primary',
-    'ready-for-dev': '--dsw-alias-label-secondary',
-    'in-progress': '--dsw-alias-state-business-primary',
-    review: '--dsw-alias-state-warn-primary',
-    done: '--dsw-alias-state-success-primary',
-    };
     const IDLE_TOKEN = '--dsw-alias-state-idle-primary';
     /** The token a lane uses when its contents want attention rather than praise. */
     const WARN_TOKEN = '--dsw-alias-state-warn-primary';
@@ -99,831 +82,355 @@ window.__ModuleLoader__.load({
     const CHEVRON_CLOSED = '\u25B8';
 
     /**
-     * BMAD Sprint Board -- the host-independent core.
+     * A small TOML reader, sized for what BMAD actually writes.
      *
-     * Pure functions over text: discover the tracking file, parse it and the
-     * deferred ledger, build the model, and (from v1) evaluate detectors against it.
+     * Not a TOML implementation. It reads the shape BMAD's own files take:
+     * `[table]` headers, `[[array-of-table]]` headers, and scalar `key = value`
+     * pairs holding strings, numbers or booleans. That is what `_bmad/config.toml`,
+     * `_bmad/custom/config.toml`, `config.user.toml` and every `tickets.toml`
+     * contain, and pulling in a parser library would be a dependency this bundle
+     * does not have.
      *
-     * This module must never reference DSH, Cordis, React, or the DOM. Anything
-     * that needs a host arrives as an injected reader; anything that needs a theme
-     * arrives as a palette. That constraint is what lets the same core back a
-     * second shell, and it is asserted by src/boundary.test.js.
+     * The failure mode is chosen deliberately: anything it cannot understand is
+     * skipped, so an unreadable file becomes a missing value and never a wrong one.
      *
-     * @module dsh-plugin-bmad-sprint-board/core
+     * @module dsh-plugin-bmad-sprint-board/toml
      */
 
-    /** Names a BMAD sprint-tracking file goes by, in preference order. */
-    const SPRINT_FILENAMES = ['sprint-status.yaml', 'sprint-status.yml'];
+    /** A basic string (`"..."`) with the escapes TOML defines for the common cases. */
+    const BASIC = /^"((?:[^"\\]|\\.)*)"/;
+    /** A literal string (`'...'`), where backslashes are ordinary characters. */
+    const LITERAL = /^'([^']*)'/;
+    /** What left of a value once the key and `=` are consumed. */
+    const ASSIGNMENT = /^([A-Za-z0-9_"'.-]+)\s*=\s*(.*)$/;
 
     /**
-     * Directories a BMAD install keeps its tracking file in, relative to the
-     * workspace root, probed before any scan. The first is the conventional
-     * layout; the rest cover a reconfigured output folder, so the common case
-     * costs a couple of stats rather than a walk. The empty string is the root.
+     * Strip a trailing comment without touching a `#` inside a quoted string.
+     *
+     * A line is scanned once so that `title = "a # b"` keeps its hash and
+     * `id = 1 # note` loses its note.
+     *
+     * @param {string} line - one raw line.
+     * @returns {string} the line with any trailing comment removed.
      */
-    const SPRINT_CANDIDATES = [
-      '_bmad-output/implementation-artifacts',
-      '_bmad-output',
-      '_bmad/implementation-artifacts',
-      '_bmad',
-      'docs',
-      'bmad',
-      '.bmad',
-      '',
-    ];
-
-    /** Directory names a scan never descends into: build output and vendored trees. */
-    const SCAN_SKIP = new Set([
-      '.cache',
-      '.git',
-      '.next',
-      '.nuxt',
-      '.output',
-      '.pnpm-store',
-      '.react-router',
-      '.svelte-kit',
-      '.tmp',
-      '.tox',
-      '.venv',
-      '.yarn',
-      '__pycache__',
-      'build',
-      'coverage',
-      'dist',
-      'node_modules',
-      'out',
-      'playwright-report',
-      'target',
-      'test-results',
-      'tmp',
-      'vendor',
-      'venv',
-    ]);
-
-    /** How deep a scan descends below the workspace root. */
-    const SCAN_MAX_DEPTH = 4;
-
-    /** Hard ceiling on the directory listings one scan may issue. */
-    const SCAN_MAX_DIRS = 400;
-
-    /** Resolved tracking-file locations, per Session, so a refresh need not rescan. */
-    const locatedSprint = new Map();
-
-    /**
-     * Join a workspace-relative directory and a child name.
-     * @param dir - the directory, or the empty string for the workspace root.
-     * @param name - the child's basename.
-     * @returns the workspace-relative path.
-     */
-    function under(dir, name) {
-      return dir === '' ? name : `${dir}/${name}`;
-    }
-
-    /**
-     * The directory part of a workspace-relative path.
-     * @param path - a workspace-relative path.
-     * @returns the directory, or the empty string for a root-level file.
-     */
-    function dirOf(path) {
-      const at = path.lastIndexOf('/');
-      return at === -1 ? '' : path.slice(0, at);
-    }
-
-    /**
-     * Whether a workspace-relative path names a readable regular file.
-     * @param stat - the injected workspace stat reader.
-     * @param path - the workspace-relative path to test.
-     * @param signal - caller cancellation.
-     * @returns true when the file is there.
-     */
-    async function fileExists(stat, path, signal) {
-      try {
-        return (await stat(path, signal)).ok;
-      } catch {
-        return false;
-      }
-    }
-
-    /**
-     * Probe the conventional BMAD locations, most likely first.
-     * @param readers - the injected workspace readers.
-     * @param signal - caller cancellation.
-     * @returns the tracking file's path, or null when no candidate is there.
-     */
-    async function probeCandidates({ stat }, signal) {
-      for (const dir of SPRINT_CANDIDATES) {
-        for (const name of SPRINT_FILENAMES) {
-          const path = under(dir, name);
-          if (await fileExists(stat, path, signal)) return path;
-        }
-      }
-      return null;
-    }
-
-    /**
-     * Walk the workspace breadth-first for a tracking file, because a project may
-     * keep BMAD output anywhere. The walk is bounded three ways -- depth, a
-     * directory budget, and a skip list for build and vendored trees -- so a large
-     * or unfamiliar workspace still settles instead of walking forever.
-     * @param readers - the injected workspace readers.
-     * @param signal - caller cancellation.
-     * @returns the tracking file's path, or null when the workspace has none.
-     */
-    async function scanForSprint({ list }, signal) {
-      const queue = [{ dir: '', depth: 0 }];
-      let visited = 0;
-
-      while (queue.length > 0 && visited < SCAN_MAX_DIRS) {
-        const { dir, depth } = queue.shift();
-        visited += 1;
-
-        let listing;
-        try {
-          listing = await list(dir, signal);
-        } catch {
-          continue;
-        }
-
-        for (const name of SPRINT_FILENAMES) {
-          if (
-            listing.some((entry) => entry.type === 'file' && entry.name === name)
-          ) {
-            return under(dir, name);
+    function stripComment(line) {
+      let quote = ''
+      for (let i = 0; i < line.length; i += 1) {
+        const ch = line[i]
+        if (quote !== '') {
+          if (ch === '\\' && quote === '"') {
+            i += 1
+          } else if (ch === quote) {
+            quote = ''
           }
-        }
-        if (depth >= SCAN_MAX_DEPTH) continue;
-
-        for (const entry of listing) {
-          if (entry.type !== 'directory' || SCAN_SKIP.has(entry.name)) continue;
-          queue.push({ dir: under(dir, entry.name), depth: depth + 1 });
+        } else if (ch === '"' || ch === "'") {
+          quote = ch
+        } else if (ch === '#') {
+          return line.slice(0, i)
         }
       }
-
-      return null;
+      return line
     }
 
     /**
-     * Locate the tracking file in the Session's selected workspace: the cached
-     * answer while it still holds, then the conventional locations, then a
-     * bounded scan.
-     * @param readers - the injected workspace readers.
-     * @param sessionId - the Session whose workspace to search.
-     * @param signal - caller cancellation.
-     * @returns the tracking file's path, or null when the workspace has none.
-     */
-    async function locateSprintPath(readers, sessionId, signal) {
-      const cached = locatedSprint.get(sessionId);
-      if (
-        cached !== undefined &&
-        (await fileExists(readers.stat, cached, signal))
-      ) {
-        return cached;
-      }
-
-      const found =
-        (await probeCandidates(readers, signal)) ??
-        (await scanForSprint(readers, signal));
-
-      if (found === null) locatedSprint.delete(sessionId);
-      else locatedSprint.set(sessionId, found);
-      return found;
-    }
-
-
-    /**
-     * Story lanes, in the order the board draws them: what is being worked on
-     * first, then what is waiting on review, then what is finished, and the
-     * not-yet-started stories last. A lane still only appears when a story is
-     * actually in that status, so an empty block costs nothing.
-     */
-    const STATUS_ORDER = [
-      'in-progress',
-      'review',
-      'done',
-      'ready-for-dev',
-      'backlog',
-    ];
-
-
-    /**
-     * Status -> the badge tone that reads it, drawn from the host's own tag
-     * palette: green for finished, amber for something wanting attention, blue
-     * for work in flight, and the neutral platform fill for a plain fact. The
-     * action and retrospective statuses live here too, so one lookup covers
-     * every badge the board draws.
-     */
-    const STATUS_TONE = {
-      backlog: 'neutral',
-      'ready-for-dev': 'neutral',
-      'in-progress': 'info',
-      review: 'warning',
-      done: 'success',
-      open: 'warning',
-      optional: 'neutral',
-    };
-
-    /**
-     * The tone for a status, defaulting to the neutral fill.
-     * @param status - a story, action, or retrospective status.
-     * @returns the tag tone.
-     */
-    function toneOf(status) {
-      return STATUS_TONE[status] ?? 'neutral';
-    }
-
-    /** The colour an epic with no recognised status falls back to. */
-
-    /** The marker a fold header uses while its body is open and closed. */
-
-    /** How many lines one `workspaceFiles.read` page asks for. */
-    const PAGE_LINES = 2000;
-
-    // --- File addressing ---------------------------------------------------
-
-    /** Scheme and type prefix of every file address the Sidebar resolves. */
-
-
-
-    // --- Reading -----------------------------------------------------------
-
-    /**
-     * Read a whole text file, one page at a time, following `eof`.
-     * @param face - the `remote.workspaceFiles` namespace.
-     * @param sessionId - scope id the Host resolves the workspace from.
-     * @param path - workspace-relative or absolute path.
-     * @param signal - caller cancellation.
-     * @returns the file's complete text.
-     */
-    async function readWholeFile(face, sessionId, path, signal) {
-      const pages = [];
-      let offset = 1;
-      for (let guard = 0; guard < 40; guard += 1) {
-        const result = await face.read(
-          sessionId,
-          path,
-          { offset, limit: PAGE_LINES },
-          signal,
-        );
-        if (!result.ok) throw result.error;
-        const page = result.value;
-        if (page.lines > 0 && page.text !== '') pages.push(page.text);
-        if (page.eof || page.lines <= 0) break;
-        offset += page.lines;
-      }
-      return pages.join('\n');
-    }
-
-    // --- Parsing -----------------------------------------------------------
-
-    /**
-     * Whether a scalar's quoting is still open, so the next line continues it.
-     * @param value - the raw accumulated value.
-     * @returns true while an odd number of double quotes has been seen.
-     */
-    function quotesOpen(value) {
-      let count = 0;
-      for (let index = 0; index < value.length; index += 1) {
-        if (value[index] === '"') count += 1;
-      }
-      return count % 2 === 1;
-    }
-
-    /**
-     * Strip one layer of matching quotes and surrounding space.
-     * @param value - a raw scalar.
-     * @returns the scalar's text.
-     */
-    function unquote(value) {
-      const trimmed = String(value ?? '').trim();
-      if (trimmed.length >= 2) {
-        const first = trimmed[0];
-        const last = trimmed[trimmed.length - 1];
-        if (
-          (first === '"' && last === '"') ||
-          (first === "'" && last === "'")
-        ) {
-          return trimmed.slice(1, -1);
-        }
-      }
-      return trimmed;
-    }
-
-    /** `key: value` at column zero: one document-level entry. */
-    const TOP_LEVEL = /^([A-Za-z_][\w-]*):[ \t]*(.*)$/;
-    /** `  key: value` under `development_status`. */
-    const STATUS_ENTRY = /^\s+([^\s:#][^:]*):[ \t]*(.*)$/;
-    /** `  - key: value` opening one `action_items` element. */
-    const ACTION_START = /^\s*-[ \t]+([A-Za-z_][\w-]*):[ \t]*(.*)$/;
-    /** `  key: value` continuing the current `action_items` element. */
-    const ACTION_FIELD = /^\s+([A-Za-z_][\w-]*):[ \t]*(.*)$/;
-    /** Any line that is indented, so it belongs to the block above it. */
-    const INDENTED = /^\s/;
-
-    /**
-     * Whether a document line carries no content.
-     * @param line - one raw line.
-     * @returns true when the reader should skip it.
-     */
-    function isSkippable(line) {
-      const trimmed = line.trim();
-      return trimmed === '' || trimmed.startsWith('#');
-    }
-
-    /**
-     * Read the `development_status` map body, a flat run of indented entries.
-     * @param lines - the document's lines.
-     * @param start - index of the first body line.
-     * @param into - the map to fill.
-     * @returns the index just past the block.
-     */
-    function readStatusMap(lines, start, into) {
-      let index = start;
-      while (index < lines.length) {
-        const line = lines[index];
-        if (isSkippable(line)) {
-          index += 1;
-          continue;
-        }
-        if (!INDENTED.test(line)) break;
-        const entry = STATUS_ENTRY.exec(line);
-        if (entry !== null) into[entry[1].trim()] = unquote(entry[2]);
-        index += 1;
-      }
-      return index;
-    }
-
-    /**
-     * Fold one `action_items` line into the element being read. A quoted value
-     * that has not closed yet keeps absorbing the lines under it.
-     * @param state - the reader's cursor, current element, and open field.
-     * @param line - the line to consume.
-     * @param into - the list that completed elements are pushed to.
-     */
-    function consumeActionLine(state, line, into) {
-      const { item, field } = state;
-      if (item !== null && field !== null && quotesOpen(item[field])) {
-        item[field] = `${item[field]} ${line.trim()}`.trim();
-        return;
-      }
-
-      const start = ACTION_START.exec(line);
-      if (start !== null) {
-        if (item !== null) into.push(item);
-        state.item = { [start[1]]: start[2].trim() };
-        state.field = start[1];
-        return;
-      }
-
-      const next = ACTION_FIELD.exec(line);
-      if (next === null || item === null) return;
-      item[next[1]] = next[2].trim();
-      state.field = next[1];
-    }
-
-    /**
-     * Read the `action_items` list body, whose string values fold across lines.
-     * @param lines - the document's lines.
-     * @param start - index of the first body line.
-     * @param into - the list to fill.
-     * @returns the index just past the block.
-     */
-    function readActionItems(lines, start, into) {
-      const state = { index: start, item: null, field: null };
-      while (state.index < lines.length) {
-        const line = lines[state.index];
-        if (line.trim() === '') {
-          state.index += 1;
-          continue;
-        }
-        if (!INDENTED.test(line)) break;
-        consumeActionLine(state, line, into);
-        state.index += 1;
-      }
-      if (state.item !== null) into.push(state.item);
-      return state.index;
-    }
-
-    /**
-     * Unquote one raw `action_items` element into the shape the board reads.
-     * @param raw - the element's fields, still quoted as the file spells them.
-     * @returns the normalized action item.
-     */
-    function normalizeAction(raw) {
-      return {
-        id: unquote(raw.id),
-        epic: unquote(raw.epic),
-        action: unquote(raw.action),
-        owner: unquote(raw.owner),
-        status: unquote(raw.status) || 'open',
-        ref: unquote(raw.ref),
-      };
-    }
-
-    /**
-     * Read the tracked subset of `sprint-status.yaml`: the scalar header, the
-     * flat `development_status` map, and the folded `action_items` list. This is
-     * deliberately not a general YAML parser -- it accepts exactly the shape the
-     * BMAD sprint-planning skill writes, and ignores anything else.
-     * @param text - the file's text.
-     * @returns the header scalars, status map, and action items.
-     */
-    function parseSprintStatus(text) {
-      const lines = String(text).split(/\r?\n/);
-      const meta = {};
-      const status = {};
-      const actions = [];
-      let index = 0;
-
-      while (index < lines.length) {
-        const line = lines[index];
-        if (isSkippable(line)) {
-          index += 1;
-          continue;
-        }
-        const top = TOP_LEVEL.exec(line);
-        if (top === null) {
-          index += 1;
-          continue;
-        }
-        if (top[1] === 'development_status') {
-          index = readStatusMap(lines, index + 1, status);
-          continue;
-        }
-        if (top[1] === 'action_items') {
-          index = readActionItems(lines, index + 1, actions);
-          continue;
-        }
-        meta[top[1]] = unquote(top[2]);
-        index += 1;
-      }
-
-      return { meta, status, actions: actions.map(normalizeAction) };
-    }
-
-    /** `## <heading>` opening one legacy ledger entry. */
-    const LEDGER_HEADING = /^##[ \t]+(.+?)[ \t]*$/;
-    /** `**Source:** value` and its two siblings. */
-    const LEDGER_LABEL = /^\*\*(Source|File|Description):\*\*[ \t]*(.*)$/;
-    /** A bullet block's own `- key:` line, or an indented `key:` sibling. */
-    const LEDGER_FIELD = /^(?:-[ \t]+|[ \t]+)([A-Za-z_]+):[ \t]*(.*)$/;
-    /** The `D<n>` number a legacy heading carries. */
-    const LEDGER_ID = /^(D\d+)\s*:/;
-
-    /**
-     * Start one empty ledger entry.
-     * @param heading - the entry's `## ` heading text, when it had one.
-     * @returns a blank entry.
-     */
-    function blankLedgerEntry(heading) {
-      const text = heading ?? '';
-      const id = LEDGER_ID.exec(text);
-      return {
-        id: id === null ? '' : id[1],
-        title: text.replace(/^D\d+\s*:[ \t]*/, '').trim(),
-        source: '',
-        file: '',
-        description: '',
-        spec: '',
-        summary: '',
-        evidence: '',
-        bullet: false,
-      };
-    }
-
-    /**
-     * Whether a `source_spec` bullet opens a new entry rather than continuing
-     * one: a bullet block is always an entry of its own, and a heading that
-     * already carries its own metadata has been closed by the block above it.
-     * @param entry - the entry being read.
-     * @returns true when the block starts its own entry.
-     */
-    function closesLedgerEntry(entry) {
-      return entry.bullet || entry.spec !== '' || entry.description !== '';
-    }
-
-    /**
-     * Apply one bullet-block field to its entry.
-     * @param entry - the entry being read.
-     * @param key - the field name.
-     * @param value - the raw field value.
-     */
-    function applyLedgerField(entry, key, value) {
-      if (key === 'source_spec') {
-        entry.bullet = true;
-        const spec = value.replace(/`/g, '').trim();
-        entry.spec = spec === 'none' ? '' : spec;
-        return;
-      }
-      if (key === 'summary') {
-        entry.summary = value.trim();
-        if (entry.title === '') entry.title = entry.summary;
-        return;
-      }
-      if (key === 'evidence') entry.evidence = value.trim();
-    }
-
-    /**
-     * Consume one ledger line.
-     * @param current - the entry being read.
-     * @param line - the line to consume.
-     * @returns the entry to carry forward, plus any entry this line closed.
-     */
-    function consumeLedgerLine(current, line) {
-      const heading = LEDGER_HEADING.exec(line);
-      if (heading !== null) {
-        return { entry: blankLedgerEntry(heading[1]), closed: current };
-      }
-
-      const labelled = LEDGER_LABEL.exec(line);
-      if (labelled !== null) {
-        current[labelled[1].toLowerCase()] = labelled[2].trim();
-        return { entry: current, closed: null };
-      }
-
-      const field = LEDGER_FIELD.exec(line);
-      if (field === null) return { entry: current, closed: null };
-
-      if (field[1] === 'source_spec' && closesLedgerEntry(current)) {
-        const entry = blankLedgerEntry(null);
-        applyLedgerField(entry, field[1], field[2]);
-        return { entry, closed: current };
-      }
-
-      applyLedgerField(current, field[1], field[2]);
-      return { entry: current, closed: null };
-    }
-
-    /**
-     * Read `deferred-work.md`. The ledger mixes two shapes on purpose: the older
-     * hand-written `## D<n>: <title>` block carrying `**Source:**`/`**File:**`/
-     * `**Description:**` lines, and the shape the build workflow appends for a
-     * newly split goal -- a bare `- source_spec:`/`summary:`/`evidence:` bullet
-     * block that deliberately has no heading and numbers nothing. Each is one
-     * entry, so a bullet block always opens a new one.
-     * @param text - the file's text.
-     * @returns the deferred entries, in file order.
-     */
-    function parseDeferredWork(text) {
-      const items = [];
-      let current = null;
-
-      for (const line of String(text).split(/\r?\n/)) {
-        if (current === null) {
-          const heading = LEDGER_HEADING.exec(line);
-          if (heading !== null) current = blankLedgerEntry(heading[1]);
-          continue;
-        }
-        const step = consumeLedgerLine(current, line);
-        if (step.closed !== null) items.push(step.closed);
-        current = step.entry;
-      }
-
-      if (current !== null) items.push(current);
-      return items.filter((item) => item.title !== '');
-    }
-
-    // --- Model -------------------------------------------------------------
-
-    /**
-     * Turn a story slug into display text.
-     * @param slug - a kebab-case slug.
-     * @returns the slug with dashes as spaces and words capitalised.
-     */
-    function humanize(slug) {
-      return String(slug)
-        .split('-')
-        .filter((word) => word !== '')
-        .map((word) =>
-          /^\d+$/.test(word) ? word : word[0].toUpperCase() + word.slice(1),
-        )
-        .join(' ');
-    }
-
-    /** An epic rollup key. */
-    const EPIC_KEY = /^epic-(\d+)$/;
-    /** An epic retrospective key. */
-    const RETRO_KEY = /^epic-(\d+)-retrospective$/;
-    /** A story key, `<epic>-<index>-<truncated slug>`. */
-    const STORY_KEY = /^(\d+)-(\d+)-(.+)$/;
-
-    /**
-     * Split the `development_status` map into its three kinds of row.
-     * @param status - the key -> status map.
-     * @returns the epic rollups, the stories, and epic number -> retrospective status.
-     */
-    function classifyStatus(status) {
-      const epics = [];
-      const stories = [];
-      const retrospectives = new Map();
-
-      for (const [key, value] of Object.entries(status)) {
-        const epic = EPIC_KEY.exec(key);
-        if (epic !== null) {
-          epics.push({
-            number: Number(epic[1]),
-            key,
-            status: value,
-            retro: '',
-            total: 0,
-            done: 0,
-          });
-          continue;
-        }
-        const retro = RETRO_KEY.exec(key);
-        if (retro !== null) {
-          retrospectives.set(Number(retro[1]), value);
-          continue;
-        }
-        const story = STORY_KEY.exec(key);
-        if (story !== null) {
-          stories.push({
-            key,
-            epic: Number(story[1]),
-            index: Number(story[2]),
-            slug: story[3],
-            status: value,
-            file: null,
-            title: humanize(story[3]),
-            deferred: 0,
-          });
-        }
-      }
-
-      return { epics, stories, retrospectives };
-    }
-
-    /**
-     * The spec slugs a story-directory listing holds.
-     * @param entries - the directory listing, if it was read.
-     * @returns the names with the `spec-` prefix and `.md` suffix removed.
-     */
-    function specSlugsOf(entries) {
-      return (entries ?? [])
-        .filter(
-          (entry) =>
-            entry.type === 'file' &&
-            entry.name.startsWith('spec-') &&
-            entry.name.endsWith('.md'),
-        )
-        .map((entry) => entry.name.slice('spec-'.length, -'.md'.length));
-    }
-
-    /**
-     * A story key is a truncated prefix of its spec file's slug, so the shortest
-     * slug that starts with the key is that story's spec.
-     * @param slugs - every spec slug in the directory.
-     * @param key - the story's truncated key.
-     * @returns the matching slug, or null when the story has no spec yet.
-     */
-    function bestSpecSlug(slugs, key) {
-      const pick = (matches) => {
-        let best = null;
-        for (const slug of slugs) {
-          if (!matches(slug)) continue;
-          if (best === null || slug.length < best.length) best = slug;
-        }
-        return best;
-      };
-      // Literal prefix first, exactly as before.
-      const literal = pick((slug) => slug === key || slug.startsWith(key));
-      if (literal !== null) return literal;
-      // Fallback for a truncated key. The tracking file caps a slug at 64
-      // characters, and the cut can land inside a hyphenated token and drop the
-      // separator: `...-resultsc` against the file's `...-results-card-...`. So
-      // compare with the separators removed. Story 1-5 in the reference repo is
-      // unresolvable without this -- its spec never linked.
-      const wanted = normalizeSlug(key);
-      return pick((slug) => normalizeSlug(slug).startsWith(wanted));
-    }
-
-    /** A slug reduced to letters and digits, for separator-insensitive matching. */
-    function normalizeSlug(value) {
-      return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
-    }
-
-    /**
-     * Point every story at its spec file and give it a full display title.
-     * @param stories - the story list, mutated in place.
-     * @param entries - the story directory's listing.
-     */
-    function linkStoriesToSpecs(stories, entries, storyDir) {
-      const slugs = specSlugsOf(entries);
-      for (const story of stories) {
-        const best = bestSpecSlug(slugs, story.key);
-        if (best === null) continue;
-        story.file = under(storyDir, `spec-${best}.md`);
-        story.title = humanize(best.replace(/^\d+-\d+-/, ''));
-      }
-    }
-
-    /**
-     * Fill in each epic's retrospective status and story progress.
-     * @param epics - the epic list, mutated in place.
-     * @param stories - every story.
-     * @param retrospectives - epic number -> retrospective status.
-     */
-    function summarizeEpics(epics, stories, retrospectives) {
-      for (const epic of epics) {
-        epic.retro = retrospectives.get(epic.number) ?? '';
-        const own = stories.filter((story) => story.epic === epic.number);
-        epic.total = own.length;
-        epic.done = own.filter((story) => story.status === 'done').length;
-        // The Status view badges each card with its epic, and colours that badge
-        // by the epic's state, so every story carries its epic's status.
-        for (const story of own) story.epicStatus = epic.status;
-      }
-    }
-
-    /**
-     * Count stories per status, keeping a slot for every known status.
-     * @param stories - every story.
-     * @returns status -> count.
-     */
-    function countByStatus(stories) {
-      const counts = {};
-      for (const name of STATUS_ORDER) counts[name] = 0;
-      for (const story of stories) {
-        counts[story.status] = (counts[story.status] ?? 0) + 1;
-      }
-      return counts;
-    }
-
-    /**
-     * Connect each deferred entry to the story whose spec it names, and count the
-     * entries hanging off each story. A ledger entry's `source_spec` is the same
-     * workspace path a story card opens, so this link is exact rather than a
-     * guess from prose. An entry naming a freeform spec -- one with no
-     * `<epic>-<index>-` prefix -- belongs to no story and keeps a null link.
-     * @param deferred - the deferred entries, annotated in place.
-     * @param stories - every story, already linked to its spec file.
-     */
-    function linkDeferredToStories(deferred, stories) {
-      const byFile = new Map();
-      for (const story of stories) {
-        if (story.file !== null) byFile.set(story.file, story);
-      }
-      for (const item of deferred) {
-        const story = item.spec === '' ? undefined : byFile.get(item.spec);
-        item.story = story ?? null;
-        if (story !== undefined) story.deferred += 1;
-      }
-    }
-
-    /**
-     * Fold the parsed files into the board's model.
-     * @param sprintText - `sprint-status.yaml` contents.
-     * @param deferredText - `deferred-work.md` contents, or empty.
-     * @param entries - the story directory's listing, or empty.
-     * @returns the board model.
-     */
-    function buildModel(sprintText, deferredText, entries, sprintPath) {
-      const sprint = parseSprintStatus(sprintText);
-      const deferred = parseDeferredWork(deferredText);
-      const { epics, stories, retrospectives } = classifyStatus(sprint.status);
-      // The tracking file names the directory its spec files live in; only when
-      // it is silent do we fall back to sitting beside the tracking file.
-      const storyDir = (sprint.meta.story_location ?? '').trim() || dirOf(sprintPath);
-
-      stories.sort(
-        (left, right) => left.epic - right.epic || left.index - right.index,
-      );
-      linkStoriesToSpecs(stories, entries, storyDir);
-      summarizeEpics(epics, stories, retrospectives);
-      linkDeferredToStories(deferred, stories);
-
-      const counts = countByStatus(stories);
-      const openActions = sprint.actions.filter(
-        (item) => item.status !== 'done',
-      );
-
-      return {
-        project: sprint.meta.project ?? '',
-        lastUpdated: sprint.meta.last_updated ?? '',
-        epics,
-        stories,
-        counts,
-        doneStories: counts.done ?? 0,
-        totalStories: stories.length,
-        openActions,
-        doneActionCount: sprint.actions.length - openActions.length,
-        deferred,
-      };
-    }
-
-    /**
-     * BMAD configuration -- where the modules say their artefacts live.
+     * Decode a scalar value.
      *
-     * BMAD lets a project move its output folders, so a board that assumes a layout
-     * is wrong the moment someone changes one. `_bmad/config.toml` declares the real
-     * paths per module, and that declaration is the primary mechanism: the
-     * conventional-candidate probe and the bounded scan stay, but only as the
-     * fallback for when config is absent or silent.
+     * Only the types that appear in BMAD files are recognised: strings, booleans,
+     * integers and floats. An array or inline table returns `undefined`, which the
+     * caller records as "present but unreadable" rather than guessing.
+     *
+     * @param {string} raw - the text after `=`.
+     * @returns {string|number|boolean|undefined} the value, or undefined if unrecognised.
+     */
+    function decode(raw) {
+      const text = raw.trim()
+      if (text === 'true') return true
+      if (text === 'false') return false
+
+      const basic = BASIC.exec(text)
+      if (basic !== null) {
+        return basic[1].replace(/\\(["\\])/g, '$1').replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+      }
+      const literal = LITERAL.exec(text)
+      if (literal !== null) return literal[1]
+
+      if (/^[+-]?\d+$/.test(text)) return Number.parseInt(text, 10)
+      if (/^[+-]?\d*\.\d+$/.test(text)) return Number.parseFloat(text)
+      return undefined
+    }
+
+    /**
+     * Read a dotted table path into an object, creating tables as needed.
+     *
+     * @param {object} root - the document being built.
+     * @param {string} path - a dotted path such as `core` or `modules.tea`.
+     * @returns {object} the table at that path.
+     */
+    function tableAt(root, path) {
+      let node = root
+      for (const part of path.split('.')) {
+        const key = part.trim().replace(/^["']|["']$/g, '')
+        if (typeof node[key] !== 'object' || node[key] === null || Array.isArray(node[key])) {
+          node[key] = {}
+        }
+        node = node[key]
+      }
+      return node
+    }
+
+    /**
+     * Parse a TOML document.
+     *
+     * @param {string} text - the file contents.
+     * @returns {object} the parsed document; unreadable lines are omitted.
+     */
+    function parseToml(text) {
+      const root = {}
+      let current = root
+
+      for (const raw of String(text).split('\n')) {
+        const line = stripComment(raw).trim()
+        if (line === '') continue
+
+        const arrayHeader = /^\[\[\s*([A-Za-z0-9_."'\s-]+?)\s*\]\]$/.exec(line)
+        if (arrayHeader !== null) {
+          const path = arrayHeader[1]
+          const parts = path.split('.')
+          const name = parts.pop().trim().replace(/^["']|["']$/g, '')
+          const parent = parts.length === 0 ? root : tableAt(root, parts.join('.'))
+          if (!Array.isArray(parent[name])) parent[name] = []
+          const entry = {}
+          parent[name].push(entry)
+          current = entry
+          continue
+        }
+
+        const header = /^\[\s*([A-Za-z0-9_."'\s-]+?)\s*\]$/.exec(line)
+        if (header !== null) {
+          current = tableAt(root, header[1])
+          continue
+        }
+
+        const assignment = ASSIGNMENT.exec(line)
+        if (assignment === null) continue
+        const key = assignment[1].replace(/^["']|["']$/g, '')
+        const value = decode(assignment[2])
+        if (value === undefined) continue
+        current[key] = value
+      }
+
+      return root
+    }
+
+    /**
+     * Merge configuration layers the way BMAD does: tables deep-merge, later wins.
+     *
+     * BMAD's own merge also keys array-of-tables by identity and appends the rest.
+     * That branch is deliberately not reproduced here, because the only values the
+     * board reads are `core.output_folder` and `core.active_initiative`, both
+     * scalars -- a layer that sets them replaces them, which is what this does.
+     *
+     * @param {object[]} layers - documents from {@link parseToml}, lowest priority first.
+     * @returns {object} the merged document.
+     */
+    function mergeLayers(layers) {
+      const merged = {}
+      const merge = (base, override) => {
+        const out = { ...base }
+        for (const [key, value] of Object.entries(override)) {
+          const existing = out[key]
+          const bothTables =
+            typeof existing === 'object' && existing !== null && !Array.isArray(existing)
+            && typeof value === 'object' && value !== null && !Array.isArray(value)
+          out[key] = bothTables ? merge(existing, value) : value
+        }
+        return out
+      }
+      for (const layer of layers) {
+        if (typeof layer !== 'object' || layer === null) continue
+        Object.assign(merged, merge(merged, layer))
+      }
+      return merged
+    }
+
+    /**
+     * Read a dotted key out of a merged document.
+     *
+     * @param {object} doc - the merged document.
+     * @param {string} key - a dotted path such as `core.output_folder`.
+     * @returns {*} the value, or undefined when any segment is missing.
+     */
+    function pick(doc, key) {
+      let node = doc
+      for (const part of key.split('.')) {
+        if (typeof node !== 'object' || node === null || Array.isArray(node)) return undefined
+        node = node[part]
+      }
+      return node
+    }
+
+    /**
+     * BMAD v7 ticket frontmatter.
+     *
+     * Every v7 ticket -- initiative, epic and story plan -- opens with a `---`
+     * fenced block of `key: value` lines. The schema is small but not exactly YAML:
+     * values are single-quoted or double-quoted strings, bare scalars, booleans, and
+     * indented `- item` lists (the `context:` a story plan carries). That subset is
+     * what this reads; a full YAML parser would be a dependency the bundle does not
+     * have.
+     *
+     * Unreadable lines are skipped, so a key the reader cannot parse is missing
+     * rather than wrong.
+     *
+     * @module dsh-plugin-bmad-sprint-board/frontmatter
+     */
+
+    /** A closing fence, which is the same three dashes as the opening one. */
+    const FENCE = /^---[ \t]*$/
+    /** `key: value`, with the value possibly empty. */
+    const SCALAR = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/
+    /** An indented `- item` belonging to the key above it. */
+    const LIST_ITEM = /^[ \t]+-[ \t]+(.*)$/
+
+    /**
+     * Read a bare scalar: a boolean, a number, or the text itself.
+     *
+     * @param {string} raw - the text after the colon.
+     * @returns {string} the unquoted value.
+     */
+    function scalar(raw) {
+      const text = raw.trim()
+      if (text.length >= 2 && text.startsWith("'") && text.endsWith("'")) {
+        return text.slice(1, -1).replace(/''/g, "'")
+      }
+      if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+        return text.slice(1, -1).replace(/\\"/g, '"')
+      }
+      return text
+    }
+
+    /**
+     * Split a document into its frontmatter and the rest.
+     *
+     * A file without a leading fence yields empty frontmatter and the whole text as
+     * the body -- which is what an `archive-v6` file should produce.
+     *
+     * @param {string} text - the file contents.
+     * @returns {{data: Map<string, string|string[]>, body: string}} the parsed keys and the remaining text.
+     */
+    function bare(text) {
+      if (text === 'true') return true
+      if (text === 'false') return false
+      if (/^[+-]?\d+$/.test(text)) return Number.parseInt(text, 10)
+      if (/^[+-]?\d*\.\d+$/.test(text)) return Number.parseFloat(text)
+      return text
+    }
+
+    function readFrontmatter(text) {
+      const lines = String(text).split('\n')
+      const data = new Map()
+
+      if (lines.length === 0 || !FENCE.test(lines[0].replace(/^\uFEFF/, ''))) {
+        return { data, body: String(text) }
+      }
+
+      let end = lines.length
+      for (let i = 1; i < lines.length; i += 1) {
+        if (FENCE.test(lines[i])) {
+          end = i
+          break
+        }
+      }
+
+      let openList = null
+      for (let i = 1; i < end; i += 1) {
+        const line = lines[i]
+        if (line.trim() === '' || line.trim().startsWith('#')) continue
+
+        const item = LIST_ITEM.exec(line)
+        if (item !== null && openList !== null) {
+          openList.push(scalar(item[1]))
+          continue
+        }
+
+        const entry = SCALAR.exec(line)
+        if (entry === null) continue
+        const [, key, value] = entry
+
+        if (value.trim() === '') {
+          // An empty value may head either a list or a nested table. A list is what
+          // BMAD writes here; a nested table is not used by any v7 ticket.
+          openList = []
+          data.set(key, openList)
+          continue
+        }
+        openList = null
+        const text = value.trim()
+        const quoted = text.startsWith("'") || text.startsWith('"')
+        data.set(key, quoted ? scalar(text) : bare(text))
+      }
+
+      // A key that opened a list and never received an item holds no information.
+      for (const [key, value] of data) {
+        if (Array.isArray(value) && value.length === 0) data.delete(key)
+      }
+
+      return { data, body: lines.slice(end + 1).join('\n') }
+    }
+
+    /**
+     * Read a string key, falling back to `null`.
+     *
+     * @param {Map<string, *>} data - from {@link readFrontmatter}.
+     * @param {string} key - the key to read.
+     * @returns {string|null} the value, or null when absent or not a string.
+     */
+    function stringOf(data, key) {
+      const value = data.get(key)
+      return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+    }
+
+    /**
+     * Read a list key, falling back to an empty list.
+     *
+     * @param {Map<string, *>} data - from {@link readFrontmatter}.
+     * @param {string} key - the key to read.
+     * @returns {string[]} the items, or an empty list.
+     */
+    function listOf(data, key) {
+      const value = data.get(key)
+      return Array.isArray(value) ? value : []
+    }
+
+    /**
+     * BMAD v7 configuration -- where output lives, and which initiative is in use.
+     *
+     * v7 replaced the per-module artefact declarations with two central keys:
+     * `core.output_folder` and `core.active_initiative`. BMAD resolves them by
+     * merging three TOML layers lowest priority first --
+     *
+     *   _bmad/config.toml
+     *   _bmad/custom/config.toml        team overrides, committed
+     *   _bmad/custom/config.user.toml   personal overrides, usually not committed
+     *
+     * -- which is exactly what `_bmad/scripts/resolve_config.py` does. This mirrors
+     * that merge so the board agrees with the tooling rather than guessing at a
+     * layout.
      *
      * @module dsh-plugin-bmad-sprint-board/config
      */
 
+
+
     /** The token BMAD writes where the project root belongs. */
     const PROJECT_ROOT = /\{project-root\}\/?/g
+
+    /** The three layers, in merge order. */
+    const CONFIG_LAYERS = [
+      '_bmad/config.toml',
+      '_bmad/custom/config.toml',
+      '_bmad/custom/config.user.toml',
+    ]
 
     /**
      * Reduce a config value to a workspace-relative path.
@@ -940,1373 +447,821 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Parse the module sections of a `config.toml`.
+     * Merge the config layers and read the two keys the board needs.
      *
-     * A deliberately small reader, not a TOML implementation: BMAD's config is flat
-     * `[modules.<name>]` tables of string values, and a full parser would be a
-     * dependency the bundle does not have. Anything it cannot understand it skips --
-     * a path it fails to read becomes a missing declaration, never a wrong one.
-     *
-     * @param {string} text - the contents of `_bmad/config.toml`.
-     * @returns {Map<string, Map<string, string>>} module name -> key -> value.
+     * @param {Array<string|null>} texts - the contents of {@link CONFIG_LAYERS}, in order; null when a file is absent.
+     * @returns {{outputFolder: string|null, activeInitiative: string|null, layers: number}} the resolved settings.
      */
-    function parseBmadConfig(text) {
-      const modules = new Map()
-      let current = null
-
-      for (const raw of String(text).split('\n')) {
-        const line = raw.replace(/#.*$/, '').trim()
-        if (line === '') continue
-
-        const section = /^\[modules\.([A-Za-z0-9_-]+)\]$/.exec(line)
-        if (section !== null) {
-          current = new Map()
-          modules.set(section[1], current)
-          continue
-        }
-        if (/^\[/.test(line)) {
-          current = null
-          continue
-        }
-        if (current === null) continue
-
-        const entry = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$/.exec(line)
-        if (entry !== null) current.set(entry[1], entry[2])
+    function resolveConfig(texts) {
+      const layers = []
+      let seen = 0
+      for (const text of texts) {
+        if (typeof text !== 'string') continue
+        layers.push(parseToml(text))
+        seen += 1
       }
+      const merged = mergeLayers(layers)
 
-      return modules
-    }
-
-    /**
-     * The artefact locations the board reads, in the order it needs them.
-     *
-     * @param {Map<string, Map<string, string>>} modules - from {@link parseBmadConfig}.
-     * @returns {{implementation: string|null, planning: string|null, knowledge: string|null}} workspace-relative paths, or null when undeclared.
-     */
-    function artifactPaths(modules) {
-      const bmm = modules.get('bmm') ?? new Map()
-      const pick = (key) => {
-        const value = bmm.get(key)
-        return value === undefined || value === '' ? null : resolveProjectPath(value)
-      }
-      return {
-        implementation: pick('implementation_artifacts'),
-        planning: pick('planning_artifacts'),
-        knowledge: pick('project_knowledge'),
-      }
-    }
-
-    /**
-     * Detectors -- the gaps board's whole reason to exist.
-     *
-     * Every detector is a pure function over the model plus whatever file content
-     * the shell has already read. Two rules hold throughout:
-     *
-     *   1. **Risks are derived.** Nothing here is written back, so nothing here can
-     *      be silently overwritten by the framework's own writer.
-     *   2. **Unverifiable is not clean.** A check that could not be evaluated
-     *      returns an `unverifiable` entry rather than nothing, because a board
-     *      showing nothing must never be confusable with a board that cannot see.
-     *
-     * @module dsh-plugin-bmad-sprint-board/detect
-     */
-
-    /** Severity vocabulary, borrowed from bmad-loop's deferred ledger. */
-    const SEVERITY = ['critical', 'high', 'medium', 'low']
-
-    /**
-     * A gap: something the evidence contradicts.
-     * @typedef {object} Gap
-     * @property {string} id - detector id, e.g. `B1`
-     * @property {string} title - what kind of problem this is
-     * @property {string} severity - one of {@link SEVERITY}
-     * @property {string} subject - the key the reader recognises, e.g. a story key
-     * @property {string} subjectKind - `story` | `epic` | `requirement` | `area`
-     * @property {string} evidence - what was observed, in one sentence
-     * @property {object} action - what to do about it
-     * @property {string} action.kind - `command` | `prompt` | `open`
-     * @property {string} action.label - the button's words
-     * @property {string} action.payload - the string to copy, or the path to open
-     */
-
-    /**
-     * A check that could not be evaluated. Never rendered as clean.
-     * @typedef {object} Unverifiable
-     * @property {string} id - detector id
-     * @property {string} subject - what could not be checked
-     * @property {string} reason - why, naming the artefact that was missing or unreadable
-     * @property {object} action - the prompt that would find out
-     */
-
-    const storyLabel = (story) => story.key
-
-    /**
-     * **B1 -- done but owing.** A story is `done` while deferred entries still name
-     * its spec. Deferred work is, by definition, work that was *not* done, so the
-     * tracking file asserts a completeness the evidence contradicts.
-     *
-     * Fires on real data: story 3-2 in the reference repo.
-     *
-     * @param {object} model - the model from `buildModel`.
-     * A deferral that attributes to no story is *not* claimed here -- an unattributed
-     * entry is the orphan-deferred detector's business, and guessing which story owns
-     * it would be exactly the silent wrongness this board exists to catch.
-     *
-     * @returns {{gaps: Gap[], unverifiable: Unverifiable[]}}
-     */
-    function detectDoneButOwing(model) {
-      const gaps = []
-      const unverifiable = []
-
-      for (const story of model.stories) {
-        if (story.status !== 'done') continue
-        // `linkDeferredToStories` attaches the story OBJECT, not its key
-        const owed = (model.deferred ?? []).filter((item) => item.story?.key === story.key)
-        if (owed.length === 0) continue
-
-        gaps.push({
-          id: 'B1',
-          title: 'done but owing',
-          severity: 'high',
-          subject: story.key,
-          subjectKind: 'story',
-          evidence:
-            `marked done, yet ${owed.length} deferred entr${owed.length === 1 ? 'y' : 'ies'} ` +
-            `still name${owed.length === 1 ? 's' : ''} this story's spec`,
-          action: {
-            kind: 'command',
-            label: 'Decide the deferrals',
-            payload: `/bmad-correct-course -- story ${story.key} is done with ${owed.length} open deferral(s)`,
-          },
-        })
-      }
-
-      return { gaps, unverifiable }
-    }
-
-    /**
-     * **B3 -- review patches never applied.** A story is `done` while unticked
-     * `[Review][Patch]` checkboxes remain in its file. Those are findings a review
-     * triaged into work and nobody did.
-     *
-     * This began as a loose proxy for "a stage was skipped" and inspection made it a
-     * rule: story 1-5 in the reference repo carries exactly two, while story 3-2 has
-     * 53 checkboxes and none unticked. So the tag is the signal -- not unticked boxes
-     * in general, which would flag every optional task anyone ever skipped.
-     *
-     * @param {object} model - the model from `buildModel`.
-     * @param {(path: string) => string|null|undefined} readStory - story-file text,
-     *   `null` when the file is known unreadable, `undefined` when not fetched.
-     * @returns {{gaps: Gap[], unverifiable: Unverifiable[]}}
-     */
-    function detectReviewPatches(model, readStory) {
-      const gaps = []
-      const unverifiable = []
-      const PATTERN = /^\s*- \[ \]\s*\[Review\]\[Patch\]\s*(.*)$/
-
-      for (const story of model.stories) {
-        if (story.status !== 'done') continue
-        if (story.file === null) {
-          unverifiable.push({
-            id: 'B3',
-            subject: story.key,
-            reason: 'no story file resolves for this key, so its review state cannot be read',
-            action: {
-              kind: 'prompt',
-              label: 'Find the missing story file',
-              payload:
-                `/bmad-sprint-planning -- story ${story.key} is marked done but no story file resolves for it under the ` +
-                'declared story_location. Find out whether the file was never created, was renamed, ' +
-                'or lives elsewhere, and tell me which.',
-            },
-          })
-          continue
-        }
-
-        const text = readStory(story.file)
-        if (text === null || text === undefined) {
-          unverifiable.push({
-            id: 'B3',
-            subject: story.key,
-            reason: `${story.file} could not be read`,
-            action: {
-              kind: 'prompt',
-              label: 'Investigate the unreadable story file',
-              payload:
-                `/bmad-sprint-planning -- I cannot read ${story.file} (story ${story.key}, marked done), so I cannot tell ` +
-                'whether its review findings were applied. Find out why it is unreadable and what ' +
-                'its review state actually is.',
-            },
-          })
-          continue
-        }
-
-        const pending = text
-          .split('\n')
-          .map((line) => PATTERN.exec(line))
-          .filter((m) => m !== null)
-          .map((m) => m[1].replace(/\s*\[[^\]]*\]\s*$/, '').trim())
-
-        if (pending.length === 0) continue
-
-        gaps.push({
-          id: 'B3',
-          title: 'review patches never applied',
-          severity: 'high',
-          subject: story.key,
-          subjectKind: 'story',
-          // Phrased like B1's: what was observed, in one sentence, without naming a
-          // single item out of several. A slice of the first one read as a truncation
-          // mid-word and told the reader less than the count does.
-          evidence:
-            `marked done, yet ${pending.length} unticked entr` +
-            `${pending.length === 1 ? 'y' : 'ies'} in the spec`,
-          action: {
-            kind: 'command',
-            label: 'Apply or reject the patches',
-            payload:
-              `/bmad-code-review -- ${pending.length} [Review][Patch] item(s) triaged on ` +
-              `${story.key} were never applied`,
-          },
-        })
-      }
-
-      return { gaps, unverifiable }
-    }
-
-    /**
-     * Run every detector and merge the results, worst first.
-     *
-     * @param {object} model - the model from `buildModel`.
-     * @param {object} [files] - content the shell has already read.
-     * @param {(path: string) => string|null|undefined} [files.readStory] - story-file reader.
-     * @returns {{gaps: Gap[], unverifiable: Unverifiable[]}}
-     */
-    function detect(model, files = {}) {
-      const readStory = files.readStory ?? (() => undefined)
-
-      const results = [detectDoneButOwing(model), detectReviewPatches(model, readStory)]
-
-      const gaps = results.flatMap((r) => r.gaps)
-      const unverifiable = results.flatMap((r) => r.unverifiable)
-      const rank = (s) => SEVERITY.indexOf(s)
-
-      gaps.sort((a, b) => rank(a.severity) - rank(b.severity) || a.subject.localeCompare(b.subject))
-      return { gaps, unverifiable }
-    }
-
-    /**
-     * Planning evidence: requirement coverage and the next-action ladder.
-     *
-     * Both read material BMAD already writes. The coverage map lives in
-     * `planning-artifacts/epics.md`; the ladder is the framework's own six-rule
-     * recommendation, rendered rather than reinvented -- `{skill, story_key, reason}`
-     * is the canonical status view's fourth element, and inventing a rival opinion
-     * about priority is exactly what the research said not to do.
-     *
-     * @module dsh-plugin-bmad-sprint-board/plan
-     */
-
-    /** Statuses in the order the framework ranks them, worst-first for action. */
-    const LADDER = [
-      {
-        status: 'in-progress',
-        skill: 'bmad-build',
-        reason: 'it is in progress -- resume it',
-        ask: 'Resume {}, which is in progress, and take it to review.',
-      },
-      {
-        status: 'review',
-        skill: 'bmad-code-review',
-        reason: 'the implementation is complete and awaiting review',
-        ask: 'Review {}, whose implementation is complete and waiting.',
-      },
-      {
-        status: 'ready-for-dev',
-        skill: 'bmad-build',
-        reason: 'it is ready to start',
-        ask: 'Start {}, which is ready for development.',
-      },
-      {
-        status: 'backlog',
-        skill: 'bmad-build',
-        reason: 'it is the next unstarted story',
-        ask: 'Start {}, the next unstarted story.',
-      },
-    ]
-
-    /**
-     * Parse the FR Coverage Map from an `epics.md`.
-     *
-     * The map is a bullet list, `- FRn (name): Epic 1, Epic 2 (Divider), ...`, and it
-     * is genuinely many-to-many: three requirements in the reference repo cross all
-     * four epics. The epic annotations inside parentheses are deliberately ignored --
-     * only the epic *numbers* matter for coverage.
-     *
-     * @param {string} text - the contents of `epics.md`, or any text holding the map.
-     * @returns {Map<string, {name: string, epics: number[]}>} keyed by `FRn`.
-     */
-    function parseFrCoverage(text) {
-      const coverage = new Map()
-      const heading = /^#{2,4}[ \t]*FR Coverage Map[ \t]*$/m.exec(text)
-      if (heading === null) return coverage
-
-      // the section runs to the next heading of the same or a higher level
-      const rest = text.slice(heading.index + heading[0].length)
-      const next = /^#{1,4}[ \t]+\S/m.exec(rest)
-      const section = next === null ? rest : rest.slice(0, next.index)
-
-      const LINE = /^[ \t]*[-*][ \t]+(FR\d+)[ \t]*\((.+)\)[ \t]*:[ \t]*(.+)$/gm
-      for (const [, id, name, targets] of section.matchAll(LINE)) {
-        const epics = [...targets.matchAll(/Epic[ \t]+(\d+)/gi)].map((m) => Number(m[1]))
-        coverage.set(id, { name: name.trim(), epics: [...new Set(epics)].sort((a, b) => a - b) })
-      }
-      return coverage
-    }
-
-    /** The requirement classes BMAD inventories, and the prefix each uses. */
-    const REQUIREMENT_CLASSES = [
-      { code: 'FR', heading: 'Functional Requirements', label: 'functional' },
-      { code: 'NFR', heading: 'NonFunctional Requirements', label: 'non-functional' },
-      { code: 'AR', heading: 'Additional Requirements', label: 'additional' },
-      { code: 'UX-DR', heading: 'UX Design Requirements', label: 'UX design' },
-    ]
-
-    /**
-     * Every requirement the inventory declares, by class.
-     *
-     * `epics.md` inventories four classes and only functional requirements get a
-     * coverage map. Reading just the map understates the project: on the reference
-     * repository it reports 17 where the inventory holds 35, so the bar measures a
-     * little over half the requirements and says nothing about the rest.
-     *
-     * The inventory form is `PREFIX<n>: Name -- description`, one per line, under a
-     * `### <heading>` section.
-     *
-     * @param {string} text - the contents of `epics.md`.
-     * @returns {Map<string, {id: string, name: string}[]>} keyed by class code.
-     */
-    function parseRequirementInventory(text) {
-      const inventory = new Map()
-      for (const { code, heading } of REQUIREMENT_CLASSES) {
-        const start = new RegExp(`^#{2,4}[ \\t]*${heading}[ \\t]*$`, 'm').exec(text)
-        if (start === null) {
-          inventory.set(code, [])
-          continue
-        }
-        const rest = text.slice(start.index + start[0].length)
-        const next = /^#{1,4}[ \t]+\S/m.exec(rest)
-        const section = next === null ? rest : rest.slice(0, next.index)
-
-        const item = new RegExp(`^[ \\t]*(${code}\\d+)[ \\t]*:[ \\t]*(.+?)[ \\t]*$`, 'gm')
-        inventory.set(
-          code,
-          [...section.matchAll(item)].map((m) => ({
-            id: m[1],
-            // Three classes separate a short name from the description with an
-            // em dash; the functional list carries no separator at all, so the
-            // first clause stands in and the UI truncates what is left.
-            name: m[2].split(/\s+(?:--|\u2014)\s+/)[0].trim().slice(0, 120),
-            // The whole statement, kept because the components a requirement is
-            // about are as often named after the dash as before it -- reading only
-            // the short name left four UX requirements looking undelivered.
-            text: m[2].trim(),
-          })),
-        )
-      }
-      return inventory
-    }
-
-    /**
-     * The requirement bar: how many requirements the epics have actually delivered.
-
-     *
-     * A requirement is **delivered** only when *every* epic that carries it is done.
-     * That is the whole point of the second bar: the story count can read 80% while
-     * most requirements sit half-built across unfinished epics.
-     *
-     * @param {Map<string, {name: string, epics: number[]}>} coverage - from {@link parseFrCoverage}.
-     * @param {Array<{key: string, status: string}>} epics - the model's epics.
-     * @returns {{total: number, delivered: number, partial: object[], unstarted: object[], unverifiable: string|null}}
-     */
-    function requirementBar(coverage, epics, inventory) {
-      if (coverage.size === 0) {
-        return {
-          total: 0,
-          delivered: 0,
-          partial: [],
-          unstarted: [],
-          unverifiable: 'no FR Coverage Map found, so requirement delivery cannot be measured',
-        }
-      }
-
-      const unowned = inventory === undefined ? { count: 0, byClass: [] } : unmappedRequirements(inventory, coverage)
-      const declared = [...(inventory?.values() ?? [])].reduce((n, list) => n + list.length, 0)
-
-      const state = new Map(epics.map((e) => [Number(e.key.replace('epic-', '')), e.status]))
-      const partial = []
-      const unstarted = []
-      let delivered = 0
-
-      for (const [id, { name, epics: carriers }] of coverage) {
-        const known = carriers.filter((n) => state.has(n))
-        if (known.length !== carriers.length || known.length === 0) {
-          partial.push({ id, name, epics: carriers, done: [], unknown: true })
-          continue
-        }
-        const done = known.filter((n) => state.get(n) === 'done')
-        if (done.length === known.length) delivered += 1
-        else if (done.length > 0) partial.push({ id, name, epics: known, done })
-        else unstarted.push({ id, name, epics: known })
-      }
+      const folder = pick(merged, 'core.output_folder')
+      const active = pick(merged, 'core.active_initiative')
 
       return {
-        total: coverage.size,
-        delivered,
-        partial,
-        unstarted,
-        unverifiable: null,
-        unmapped: unowned.count,
-        unmappedByClass: unowned.byClass,
-        declared: declared === 0 ? coverage.size : declared,
+        outputFolder: typeof folder === 'string' && folder !== '' ? resolveProjectPath(folder) : null,
+        activeInitiative: typeof active === 'string' && active !== '' ? active.replace(/\/+$/, '') : null,
+        layers: seen,
       }
     }
 
     /**
-     * Requirements the inventory declares but no coverage map claims.
+     * Recognise a BMAD installation and which major version it is.
      *
-     * These are the honest remainder: inventoried, unowned by any epic, and cited by
-     * no story, so nothing can verify whether they were delivered. Reporting only
-     * the mapped ones would put a number on the board that reads as complete.
+     * The two versions keep different central state: v7 declares `core.output_folder`
+     * and work lives in `initiative-*` folders, while v6 declared per-module artefact
+     * paths and tracked work in `sprint-status.yaml`. The board supports v7 only, so
+     * telling a v6 project what it is beats rendering a v7 board over v6 files and
+     * showing an empty one.
      *
-     * @param {Map<string, {id: string, name: string}[]>} inventory - from {@link parseRequirementInventory}.
-     * @param {Map<string, {name: string, epics: number[]}>} coverage - from {@link parseFrCoverage}.
-     * @returns {{count: number, byClass: {code: string, label: string, items: object[]}[]}}
+     * @param {{config: {outputFolder: string|null}, hasSprintStatus: boolean, initiatives: number}} probe - what was found on disk.
+     * @returns {'v7'|'v6'|'none'} the detected version.
      */
-    function unmappedRequirements(inventory, coverage) {
-      const byClass = []
-      let count = 0
-      for (const { code, label } of REQUIREMENT_CLASSES) {
-        const items = (inventory.get(code) ?? []).filter((item) => !coverage.has(item.id))
-        if (items.length === 0) continue
-        byClass.push({ code, label, items })
-        count += items.length
-      }
-      return { count, byClass }
-    }
-
-    const byPosition = (a, b) => a.epic - b.epic || a.index - b.index || a.key.localeCompare(b.key)
-
-    /**
-     * The next action, from the framework's own ladder.
-     *
-     * Returns exactly one answer with its reason. A board that offers three has not
-     * answered, which is why this is a single recommendation and not a ranked list.
-     *
-     * @param {object} model - the model from `buildModel`.
-     * @returns {{skill: string, key: string|null, label: string, reason: string}}
-     */
-    function nextAction(model) {
-      const stories = [...model.stories].sort(byPosition)
-
-      for (const rung of LADDER) {
-        const match = stories.find((s) => s.status === rung.status)
-        if (match !== undefined) {
-          return {
-            skill: rung.skill,
-            key: match.key,
-            label: match.title ?? match.key,
-            reason: rung.reason,
-            // The board cannot emit a runnable command: a skill is invoked through
-            // `_bmad/scripts/render_skill.py`, which needs the absolute project root
-            // and skill root, and the workspace face exposes neither. So this is a
-            // request, and it says so rather than wearing a command's clothes.
-            action: {
-              kind: 'prompt',
-              label: 'Ask an agent to run it',
-              payload:
-                `/${rung.skill} -- ${rung.ask.replace('{}', match.key)}\n\n` +
-                `Story: ${match.key}\nStatus: ${match.status}\n` +
-                `The sprint board reads this as the next action: ${rung.reason}.`,
-            },
-          }
-        }
-      }
-
-      const openRetro = model.epics.find((e) => e.retro === 'optional')
-      if (openRetro !== undefined) {
-        return {
-          skill: 'bmad-retrospective',
-          key: openRetro.key,
-          label: openRetro.key,
-          reason: 'all stories are done and this retrospective is still open',
-          action: {
-            kind: 'prompt',
-            label: 'Ask an agent to run it',
-            payload:
-              `/bmad-retrospective -- every story is done and ${openRetro.key} is still open.\n\n` +
-              'Run the retrospective and record its verdict.',
-          },
-        }
-      }
-
-      return { skill: null, key: null, label: '', reason: 'every story is done', action: null }
+    function detectedVersion(probe) {
+      if (probe.config.outputFolder !== null && probe.initiatives > 0) return 'v7'
+      if (probe.hasSprintStatus) return 'v6'
+      if (probe.config.outputFolder !== null) return 'v7'
+      return 'none'
     }
 
     /**
-     * The two bars. Requirements never shrink their denominator when something
-     * cannot be verified -- an unknown counts against the number, so a board cannot
-     * improve its score by going blind.
+     * The BMAD v7 ticket store, read from files.
      *
-     * @param {object} model - the model from `buildModel`.
-     * @param {object} requirements - the result of {@link requirementBar}.
-     * @returns {{stories: object, requirements: object}}
+     * A v7 initiative keeps its work under `tickets/`:
+     *
+     *   tickets/tickets.toml                      [[epic]] id, slug, title
+     *   tickets/epic-<slug>/epic-<slug>.md        type: epic, title, parent, status
+     *   tickets/epic-<slug>/tickets/tickets.toml  [[entry]] id, type, title, v6_key
+     *   tickets/epic-<slug>/tickets/<type>-<slug>-plan.md
+     *
+     * The index and the file are separate records of the same ticket, and they can
+     * disagree. `tickets.py` links a plan to its entry through the plan's own
+     * `ticket` key; a plan without one is an orphan it reports under `problems`.
+     * This module reproduces the index, and keeps the linking question visible
+     * rather than resolving it with a guess.
+     *
+     * @module dsh-plugin-bmad-sprint-board/store
      */
-    function bars(model, requirements) {
-      const total = model.stories.length
-      const done = model.stories.filter((s) => s.status === 'done').length
-      return {
-        stories: { done, total, unverifiable: 0, percent: total === 0 ? 0 : Math.round((done / total) * 100) },
-        requirements: {
-          done: requirements.delivered,
-          total: requirements.total,
-          unverifiable: requirements.unverifiable === null ? 0 : requirements.total,
-          // A missing measurement is not a zero. Without a coverage map the bar has
-          // no denominator at all, and `0 / 0` would read as "nothing to do" rather
-          // than "cannot measure" -- the one confusion this board must not permit.
-          noData: requirements.unverifiable !== null,
-          // declared but unowned: present so the bar cannot read as complete
-          unmapped: requirements.unmapped ?? 0,
-          declared: requirements.declared ?? 0,
-          percent:
-            requirements.total === 0
-              ? 0
-              : Math.round((requirements.delivered / requirements.total) * 100),
-        },
-      }
+
+
+
+
+    /** The prefix every plan file shares. */
+    const PLAN_SUFFIX = '-plan.md'
+
+    /**
+     * Reduce a title to the slug BMAD derives file names from.
+     *
+     * @param {string} title - a ticket title.
+     * @returns {string} the kebab-case slug.
+     */
+    function slugify(title) {
+      return String(title)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
     }
 
     /**
-     * UX evidence: whether the design artefacts and the UX requirements are tied to
-     * anything that can verify them.
+     * Read the epic index of an initiative.
      *
-     * UX is a core requirement class (11 `UX-DR` entries on the reference project),
-     * and it produces its own artefacts under `planning-artifacts/ux-designs/`. Both
-     * halves can come adrift: a design run nothing downstream claims is a document
-     * nobody reads, and a UX requirement no artefact names is one nothing can close.
-     * Neither shows up as a gap anywhere else, because the coverage map is
-     * functional-only.
-     *
-     * @module dsh-plugin-bmad-sprint-board/ux
+     * @param {string|null} text - the contents of `tickets/tickets.toml`.
+     * @returns {Array<{id: number|string|null, slug: string, title: string}>} the epics, in file order.
      */
-
-    /** The directory UX runs live in, relative to the declared planning folder. */
-    const UX_DIR = 'ux-designs'
-
-    /**
-     * The UX design runs present, from a listing of the `ux-designs` directory.
-     *
-     * A run is a directory; the loose files beside them belong to no run.
-     *
-     * @param {Array<{type: string, name: string}>} entries - the directory listing.
-     * @returns {Array<{name: string, file: string}>} the runs, in name order.
-     */
-    function parseUxRuns(entries) {
-      return (entries ?? [])
-        .filter((entry) => entry.type === 'directory')
-        .map((entry) => ({ name: entry.name, file: `${UX_DIR}/${entry.name}` }))
-        .sort((a, b) => a.name.localeCompare(b.name))
-    }
-
-    /**
-     * Which runs the epics document names as an input.
-     *
-     * The check is deliberately narrow: `epics.md` is the document that turns design
-     * into work, so a run it does not cite is a run the plan does not carry forward.
-     * That is a weaker claim than "nothing cites it" and a checkable one, which
-     * matters more.
-     *
-     * @param {Array<{name: string, file: string}>} runs - from {@link parseUxRuns}.
-     * @param {string} epicsText - the contents of the epics document.
-     * @returns {Array<{name: string, file: string, claimed: boolean}>} the runs, marked.
-     */
-    function linkUxRuns(runs, epicsText) {
-      const text = epicsText ?? ''
-      return runs.map((run) => ({ ...run, claimed: text.includes(run.name) }))
-    }
-
-    /**
-     * **U1: a UX design run the plan does not carry.**
-     *
-     * Fires when the epics document names no such run. It is an orphan in the
-     * ordinary sense: produced, and then not built on.
-     *
-     * @param {Array<{name: string, file: string}>} runs - from {@link parseUxRuns}.
-     * @param {string} epicsText - the contents of the epics document.
-     * @returns {{gaps: object[], unverifiable: object[]}}
-     */
-    function detectUxRuns(runs, epicsText) {
-      const gaps = []
-      const unverifiable = []
-
-      if (runs.length === 0) {
-        // No runs at all is only worth saying when the inventory asks for UX work.
-        return { gaps, unverifiable }
-      }
-      if ((epicsText ?? '').trim() === '') {
-        unverifiable.push({
-          id: 'U1',
-          subject: `${runs.length} UX design run${runs.length === 1 ? '' : 's'}`,
-          reason: 'the epics document could not be read, so no run can be checked against the plan',
-          action: {
-            kind: 'prompt',
-            label: 'Find the epics document',
-            payload:
-              '/bmad-correct-course -- the UX design runs exist but the epics document could not be read, so I cannot tell ' +
-              'which of them the plan carries forward. Find out whether epics.md moved, and where.',
-          },
-        })
-        return { gaps, unverifiable }
-      }
-
-      for (const run of linkUxRuns(runs, epicsText)) {
-        if (run.claimed) continue
-        gaps.push({
-          id: 'U1',
-          title: 'UX run not carried into the plan',
-          severity: 'medium',
-          subject: run.name,
-          subjectKind: 'area',
-          evidence: 'the epics document names no input from this UX design run',
-          action: {
-            kind: 'prompt',
-            label: 'Ask whether it still applies',
-            payload:
-              `/bmad-correct-course -- the UX design run ${run.name} exists, and the epics document declares inputs from ` +
-              'no part of it. Tell me whether its decisions are already covered elsewhere, whether ' +
-              'it should feed the plan, or whether it is superseded and can be retired.',
-          },
-        })
-      }
-
-      return { gaps, unverifiable }
-    }
-
-    /**
-     * Component identifiers a piece of prose names.
-     *
-     * A UX requirement describes components by name -- `ValueField`,
-     * `SeriesRowControls` -- and story files name the same components because they
-     * build them. That shared vocabulary is the only join between a design
-     * requirement and the epic that delivers it: the ids are never cross-referenced.
-     *
-     * The shape matters. A capitalised word is usually just a sentence starting, so
-     * the filter takes PascalCase with an internal capital: `ValueField` qualifies,
-     * `Component` and `HTML` do not. Without it, "Error" links to nineteen stories
-     * and every requirement appears covered.
-     *
-     * @param {string} text - prose to scan.
-     * @returns {string[]} the identifiers, sorted.
-     */
-    function componentNames(text) {
-      const words = String(text ?? '').match(/\b[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+\b/g) ?? []
-      return [...new Set(words)].sort()
-    }
-
-    /**
-     * Which stories and epics carry each UX requirement.
-     *
-     * The link is derived, never declared: a requirement names components, a story
-     * names the same components, and the story knows its epic. It is a claim about
-     * evidence, so the caller can see the components it rests on.
-     *
-     * @param {Map<string, {id: string, name: string}[]>} inventory - from `parseRequirementInventory`.
-     * @param {Array<{key: string, epic: number, index: number, title: string, file: string|null}>} stories - the model's stories.
-     * @param {Map<string, string>} storyText - story path to contents.
-     * @returns {Map<string, {components: string[], stories: string[], epics: number[]}>} keyed by requirement id.
-     */
-    function linkUxToEpics(inventory, stories, storyText) {
-      const links = new Map()
-      const byFile = new Map(stories.map((story) => [story.file, story]))
-
-      for (const item of inventory?.get('UX-DR') ?? []) {
-        const components = componentNames(item.text ?? item.name)
-        const hits = new Map()
-
-        for (const [file, text] of storyText ?? []) {
-          const story = byFile.get(file)
-          if (story === undefined) continue
-          for (const component of components) {
-            if (!new RegExp(`\\b${component}\\b`).test(text)) continue
-            if (!hits.has(story.key)) hits.set(story.key, { story, components: new Set() })
-            hits.get(story.key).components.add(component)
-          }
-        }
-
-        const matched = [...hits.values()]
-        links.set(item.id, {
-          components,
-          stories: matched.map((hit) => hit.story.key),
-          epics: [...new Set(matched.map((hit) => hit.story.epic))].sort((a, b) => a - b),
-        })
-      }
-
-      return links
-    }
-
-    /**
-     * **U2: a UX requirement nothing names.**
-     *
-     * Fires when no story file cites the requirement id. The reference project names
-     * all 11 of its `UX-DR` entries exclusively in two retrospective documents, so
-     * the work they describe is delivered without any story claiming it.
-     *
-     * @param {Map<string, {id: string, name: string}[]>} inventory - from `parseRequirementInventory`.
-     * @param {string[]} storyTexts - the text of every story file the shell has read.
-     * @returns {{gaps: object[], unverifiable: object[]}}
-     */
-    function detectUxRequirements(inventory, stories, storyText) {
-      const items = inventory?.get('UX-DR') ?? []
-      if (items.length === 0) return { gaps: [], unverifiable: [] }
-
-      if ((storyText?.size ?? 0) === 0) {
-        return {
-          gaps: [],
-          unverifiable: [
-            {
-              id: 'U2',
-              subject: `${items.length} UX design requirements`,
-              reason: 'no story file was readable, so none can be checked for the work it describes',
-              action: {
-                kind: 'prompt',
-                label: 'Ask which stories carry the UX work',
-                payload:
-                  `/bmad-correct-course -- the inventory declares ${items.length} UX design requirements and I could read ` +
-                  'no story file, so I cannot tell which of them any story carries. Find out which ' +
-                  'stories carry this work.',
-              },
-            },
-          ],
-        }
-      }
-
-      const links = linkUxToEpics(inventory, stories, storyText)
-      const unlinked = items.filter((item) => (links.get(item.id)?.epics.length ?? 0) === 0)
-      if (unlinked.length === 0) return { gaps: [], unverifiable: [] }
-
-      return {
-        gaps: [
-          {
-            id: 'U2',
-            title: 'UX requirement no epic delivers',
-            severity: 'high',
-            subject: `${unlinked.length} of ${items.length} UX design requirements`,
-            subjectKind: 'requirement',
-            evidence:
-              'no story names the components ' +
-              `${unlinked.map((item) => item.id).join(', ')} describe`,
-            action: {
-              kind: 'prompt',
-              label: 'Ask where this UX work went',
-              payload:
-                `/bmad-correct-course -- ${unlinked.length} of ${items.length} UX design requirements name components that no ` +
-                `story mentions: ${unlinked
-                  .map((item) => `${item.id} (${componentNames(item.text ?? item.name).join(', ') || item.name})`)
-                  .join('; ')}. Tell me for each whether the work shipped under another name, was ` +
-                'dropped, or still needs an epic.',
-            },
-          },
-        ],
-        unverifiable: [],
-      }
-    }
-
-    /**
-     * The requirements view: every requirement the project declares, grouped by
-     * class, each carrying the strongest state its evidence supports.
-     *
-     * Four classes are inventoried and only functional requirements get a coverage
-     * map. That asymmetry is the point of this view: it does not pretend the other
-     * three are unstarted, and it does not hide them. A requirement with no evidence
-     * path reads as unverifiable, which is a different thing from not done.
-     *
-     * @module dsh-plugin-bmad-sprint-board/requirements
-     */
-
-
-
-    /** The states a requirement row can carry. */
-    const REQ_STATE = {
-      done: 'done',
-      partial: 'partial',
-      todo: 'todo',
-      unknown: 'unknown',
-    }
-
-    /**
-     * How many acceptance criteria a story file states.
-     *
-     * They are the bullets under `**Acceptance Criteria:**` inside
-     * `## Tasks & Acceptance`. They carry no checkbox of their own -- verification
-     * is by test, not by ticking -- so a story's own status is the only completion
-     * signal that exists for them, and the view says so rather than inventing one.
-     *
-     * @param {string} text - a story file's contents.
-     * @returns {number} the criteria stated, or 0 when the section is absent.
-     */
-    function countAcceptance(text) {
-      if (typeof text !== 'string' || text === '') return 0
-
-      // Walked line by line rather than matched. A regex terminator of
-      // `(?=^## |$)` looks right and is not: under the `m` flag `$` matches at the
-      // end of the heading's own line, so the section came out empty and every
-      // story reported zero criteria.
-      let inSection = false
-      let inCriteria = false
-      let count = 0
-
-      for (const line of text.split('\n')) {
-        if (/^##[ \t]/.test(line)) {
-          inSection = /^##[ \t]+Tasks & Acceptance[ \t]*$/.test(line)
-          inCriteria = false
-          continue
-        }
-        if (!inSection) continue
-        if (/^\*\*[^*]+\*\*[ \t]*$/.test(line)) {
-          inCriteria = /^\*\*Acceptance Criteria:\*\*[ \t]*$/.test(line)
-          continue
-        }
-        if (inCriteria && /^[ \t]*[-*][ \t]+\S/.test(line)) count += 1
-      }
-
-      return count
-    }
-
-    /**
-     * Functional requirements, resolved through the coverage map and epic statuses.
-     *
-     * A requirement is done when every epic claiming it is done, not started when
-     * none has begun, and partial in between -- the same reading the summary bar
-     * uses, so the two can never disagree.
-     *
-     * @param {Map<string, {name: string, epics: number[]}>} coverage - from `parseFrCoverage`.
-     * @param {Array<{key: string, status: string}>} epics - the model's epics.
-     * @returns {Array<object>} rows.
-     */
-    function functionalRows(coverage, epics) {
-      const status = new Map(epics.map((e) => [Number(String(e.key).replace('epic-', '')), e.status]))
-      const rows = []
-      for (const [id, entry] of coverage) {
-        const states = entry.epics.map((n) => status.get(n) ?? 'backlog')
-        const all = states.length > 0 && states.every((s) => s === 'done')
-        const any = states.some((s) => s !== 'backlog')
-        rows.push({
-          id,
-          name: entry.name,
-          state: all ? REQ_STATE.done : any ? REQ_STATE.partial : REQ_STATE.todo,
-          note: states.length === 0 ? 'no epic claims it' : `epic ${entry.epics.join(', ')}`,
-        })
-      }
+    function readEpicIndex(text) {
+      if (typeof text !== 'string') return []
+      const doc = parseToml(text)
+      const rows = Array.isArray(doc.epic) ? doc.epic : []
       return rows
+        .filter((row) => typeof row.slug === 'string' && row.slug !== '')
+        .map((row) => ({ id: row.id ?? null, slug: row.slug, title: row.title ?? '' }))
     }
 
     /**
-     * Acceptance criteria, one row per story that states any.
+     * Read the story index inside one epic folder.
      *
-     * The row's state is the story's, because an individual criterion has no
-     * completion marker. This is a proxy and the note names it as one.
-     *
-     * @param {Array<{key: string, title: string, status: string, file: string|null}>} stories - the model's stories.
-     * @param {Map<string, string>} storyText - story path to contents.
-     * @returns {Array<object>} rows, in board order.
+     * @param {string|null} text - the contents of `tickets/epic-<slug>/tickets/tickets.toml`.
+     * @returns {Array<{id: string, type: string, title: string, v6Key: string|null}>} the entries, in file order.
      */
-    function acceptanceRows(stories, storyText) {
-      const rows = []
-      for (const story of stories) {
-        const text = story.file === null ? undefined : storyText.get(story.file)
-        const count = countAcceptance(text ?? '')
-        if (count === 0) continue
-        rows.push({
-          id: `${story.epic}.${story.index}`,
-          name: story.title,
-          state:
-            story.status === 'done'
-              ? REQ_STATE.done
-              : story.status === 'backlog'
-                ? REQ_STATE.todo
-                : REQ_STATE.partial,
-          note: `${count} criteria, state follows the story`,
-        })
-      }
-      return rows
-    }
-
-    /**
-     * Requirements from a class with no coverage map.
-     *
-     * No epic claims them, no story cites them, and no gate reports on them, so
-     * there is nothing to read a state from. They are listed as unverifiable rather
-     * than as outstanding work, because the board cannot tell the two apart and
-     * saying "not done" would be a guess.
-     *
-     * @param {Array<{id: string, name: string}>} items - the inventory's entries.
-     * @param {string} why - what is missing, short enough for a row.
-     * @returns {Array<object>} rows.
-     */
-    function unverifiableRows(items, why) {
-      return items.map((item) => ({
-        id: item.id,
-        name: item.name,
-        state: REQ_STATE.unknown,
-        note: why,
+    function readStoryIndex(text) {
+      if (typeof text !== 'string') return []
+      const doc = parseToml(text)
+      const rows = Array.isArray(doc.entry) ? doc.entry : []
+      return rows.map((row) => ({
+        id: String(row.id ?? ''),
+        type: typeof row.type === 'string' ? row.type : 'story',
+        title: typeof row.title === 'string' ? row.title : '',
+        v6Key: typeof row.v6_key === 'string' ? row.v6_key : null,
       }))
     }
 
     /**
-     * Every requirement, grouped into the lanes the view renders.
+     * Read a plan file's frontmatter into the fields the board uses.
      *
-     * @param {object} input - the parsed artefacts.
-     * @param {string} input.epicsText - the epics document, for the inventory.
-     * @param {Map<string, {name: string, epics: number[]}>} input.coverage - the FR coverage map.
-     * @param {Array<object>} input.epics - the model's epics.
-     * @param {Array<object>} input.stories - the model's stories.
-     * @param {Map<string, string>} [input.storyText] - story path to contents.
-     * @returns {{lanes: object[], totals: object}} the lanes and their totals.
+     * @param {string} text - the plan file's contents.
+     * @param {string} path - its workspace-relative path.
+     * @returns {{path: string, title: string|null, type: string|null, status: string|null, ticket: string|null, baseline: string|null, context: string[]}} the plan.
      */
-    function requirementsView(input) {
-      // Declared before the lanes: three of them read an epic's status, and one
-      // that sits above this line fails at render with a dead-zone error.
-      const epicStatus = new Map(
-        (input.epics ?? []).map((e) => [Number(String(e.key).replace('epic-', '')), e.status]),
-      )
-
-      const inventory = parseRequirementInventory(input.epicsText ?? '')
-      const storyText = input.storyText ?? new Map()
-
-      const functional = functionalRows(input.coverage ?? new Map(), input.epics ?? [])
-      const acceptance = acceptanceRows(input.stories ?? [], storyText)
-
-      const lanes = [
-        { code: 'FR', label: 'functional', rows: functional, verifiable: true },
-        { code: 'AC', label: 'acceptance', rows: acceptance, verifiable: true },
-      ]
-
-      // Architecture decisions are cited by id, so this lane reads like the
-      // functional one: a decision is delivered when the epics citing it are.
-      const decisions = input.decisions ?? new Map()
-      if (decisions.size > 0) {
-        lanes.push({
-          code: 'AD',
-          label: 'architecture',
-          verifiable: true,
-          rows: [...decisions.entries()].map(([id, link]) => {
-            const states = link.epics.map((n) => epicStatus.get(n) ?? 'backlog')
-            return {
-              id,
-              name: input.decisionTitles?.get(id) ?? '',
-              state:
-                link.epics.length === 0
-                  ? REQ_STATE.unknown
-                  : states.every((state) => state === 'done')
-                    ? REQ_STATE.done
-                    : states.some((state) => state !== 'backlog')
-                      ? REQ_STATE.partial
-                      : REQ_STATE.todo,
-              note:
-                link.epics.length === 0
-                  ? 'no story cites it'
-                  : `epic ${link.epics.join(', ')} across ${link.stories.length} stor${link.stories.length === 1 ? 'y' : 'ies'}`,
-            }
-          }),
-        })
+    function readPlan(text, path) {
+      const { data } = readFrontmatter(text)
+      return {
+        path,
+        title: stringOf(data, 'title'),
+        type: stringOf(data, 'type'),
+        status: stringOf(data, 'status'),
+        ticket: stringOf(data, 'ticket'),
+        baseline: stringOf(data, 'baseline_commit'),
+        context: listOf(data, 'context'),
       }
+    }
 
-      for (const { code, label } of REQUIREMENT_CLASSES) {
-        if (code === 'FR') continue
-        const items = inventory.get(code) ?? []
-        if (items.length === 0) continue
+    /**
+     * Decide which plan file belongs to which index entry.
+     *
+     * Three outcomes, and keeping them apart is the point:
+     *
+     * - a plan whose `ticket` names an entry is **linked**, by BMAD's own rule;
+     * - a plan with no `ticket` whose file name is the one BMAD would derive from an
+     *   entry's title is **unlinked** -- the file is almost certainly that entry's,
+     *   but the store does not say so, and the board reports that instead of
+     *   asserting it;
+     * - everything else is an **orphan**: a plan the index does not claim, or an
+     *   entry with no plan at all.
+     *
+     * A name match is only accepted when exactly one entry could claim it, so an
+     * ambiguous match is never resolved by picking the first.
+     *
+     * @param {Array<object>} entries - from {@link readStoryIndex}.
+     * @param {Array<object>} plans - from {@link readPlan}, all plans in the epic.
+     * @returns {{links: Map<string, object>, unlinked: Array<object>, orphans: Array<object>, missing: Array<object>}} the linking result.
+     */
+    function linkPlans(entries, plans) {
+      const links = new Map()
+      const unlinked = []
+      const claimed = new Set()
 
-        // UX is the one class with a join to the plan: a requirement names the
-        // components it is about, and a story names them because it builds them. So
-        // its rows read like functional ones instead of as a wall of unknowns.
-        if (code === 'UX-DR') {
-          const links = input.uxLinks ?? new Map()
-          lanes.push({
-            code,
-            label,
-            verifiable: true,
-            rows: items.map((item) => {
-              const link = links.get(item.id)
-              const epics = link?.epics ?? []
-              const states = epics.map((n) => epicStatus.get(n) ?? 'backlog')
-              const done = states.length > 0 && states.every((state) => state === 'done')
-              return {
-                id: item.id,
-                name: item.name,
-                state:
-                  epics.length === 0
-                    ? REQ_STATE.unknown
-                    : done
-                      ? REQ_STATE.done
-                      : states.some((state) => state !== 'backlog')
-                        ? REQ_STATE.partial
-                        : REQ_STATE.todo,
-                note:
-                  epics.length === 0
-                    ? 'no story names the components it describes'
-                    : `epic ${epics.join(', ')} via ${link.components.slice(0, 2).join(', ')}`,
-              }
-            }),
-          })
-          continue
+      for (const plan of plans) {
+        if (plan.ticket === null) continue
+        const match = entries.find((entry) => entry.id === plan.ticket)
+        if (match !== undefined && !links.has(match.id)) {
+          links.set(match.id, plan)
+          claimed.add(plan.path)
         }
+      }
 
-        lanes.push({
-          code,
-          label,
-          rows: unverifiableRows(items, 'no coverage map, no story cites it'),
-          verifiable: false,
+      for (const entry of entries) {
+        if (links.has(entry.id)) continue
+        const wanted = `${entry.type}-${slugify(entry.title)}`
+        const stemOf = (plan) => {
+          const name = plan.path.slice(plan.path.lastIndexOf('/') + 1)
+          return name.endsWith(PLAN_SUFFIX) ? name.slice(0, -PLAN_SUFFIX.length) : null
+        }
+        const matches = (plan) => {
+          if (plan.ticket !== null || claimed.has(plan.path)) return false
+          const stem = stemOf(plan)
+          if (stem === null) return false
+          // BMAD derives the file name from the title, and a title that was still
+          // moving when the file was created leaves a stem that is a truncated form
+          // of the current one. Truncation happens before the suffix, so both sides
+          // are compared without it. Either direction counts; neither is accepted
+          // unless it is also unambiguous.
+          return wanted.startsWith(stem) || stem.startsWith(wanted)
+        }
+        const candidates = plans.filter(matches)
+        const rivals = entries.filter((other) => {
+          if (links.has(other.id) || other.id === entry.id) return false
+          const theirs = `${other.type}-${slugify(other.title)}`
+          return plans.some((plan) => {
+            if (!matches(plan)) return false
+            const stem = stemOf(plan)
+            return theirs.startsWith(stem) || stem.startsWith(theirs)
+          })
         })
+        if (candidates.length === 1 && rivals.length === 0) {
+          links.set(entry.id, candidates[0])
+          claimed.add(candidates[0].path)
+          unlinked.push({ entry, plan: candidates[0] })
+        }
       }
 
-      const count = (state) =>
-        lanes.reduce((n, lane) => n + lane.rows.filter((row) => row.state === state).length, 0)
-      const declared = lanes.reduce((n, lane) => n + lane.rows.length, 0)
+      const orphans = plans.filter((plan) => !claimed.has(plan.path))
+      const missing = entries.filter((entry) => !links.has(entry.id))
+      return { links, unlinked, orphans, missing }
+    }
 
+    /**
+     * The board model: one BMAD v7 project, read into initiatives, epics and tickets.
+     *
+     * The model is built from text alone -- it never touches the file system, so it
+     * is exercised directly by the tests and the shell only supplies the strings.
+     *
+     * A v7 project can have several initiatives and only one is "active". The board
+     * builds every initiative so the reader can switch between them without a
+     * reload, and marks the active one rather than hiding the rest.
+     *
+     * @module dsh-plugin-bmad-sprint-board/model
+     */
+
+
+
+
+    /**
+     * The published order of ticket states, oldest first.
+     *
+     * These are the words BMAD v7 writes into a plan's `status`: the builds write
+     * `draft` through `built`, an unattended run writes `blocked` when it halts, and
+     * Sofia writes `done` or `dropped`. `in-progress` and `review` come from the PO
+     * skill's own vocabulary and appear on real tickets, so they are carried too.
+     */
+    const STATUS_ORDER = [
+      'blocked',
+      'in-progress',
+      'review',
+      'built',
+      'draft',
+      'done',
+      'dropped',
+    ]
+
+    /** States that mean the work is finished, whichever word was used. */
+    const SETTLED = new Set(['done', 'dropped'])
+
+    /** The words the board recognises; anything else is reported as unrecognised. */
+    const KNOWN_STATUS = new Set(STATUS_ORDER)
+
+    /**
+     * Read an initiative ticket's own file.
+     *
+     * @param {string|null} text - the contents of `initiative-<slug>.md`, or null when absent.
+     * @returns {{title: string|null, status: string|null, type: string|null}} what the file declares.
+     */
+    function readInitiativeTicket(text) {
+      if (typeof text !== 'string') return { title: null, status: null, type: null }
+      const { data } = readFrontmatter(text)
       return {
-        lanes,
-        totals: {
-          declared,
-          done: count(REQ_STATE.done),
-          partial: count(REQ_STATE.partial),
-          todo: count(REQ_STATE.todo),
-          unknown: count(REQ_STATE.unknown),
-        },
+        title: stringOf(data, 'title'),
+        status: stringOf(data, 'status'),
+        type: stringOf(data, 'type'),
       }
     }
 
     /**
-     * What a spec file says about itself: its title, its tasks, and how many are
-     * ticked.
+     * Read an epic ticket's own file.
      *
-     * A standalone spec is one no tracking key claims, so the sprint file knows
-     * nothing about it and the file is the only source. Its checkboxes are the only
-     * progress signal that exists.
-     *
-     * @param {string} text - a spec file's contents.
-     * @returns {{title: string, tasks: number, ticked: number, criteria: number}} the reading.
+     * @param {string|null} text - the contents of `epic-<slug>.md`, or null when absent.
+     * @returns {{title: string|null, status: string|null, parent: string|null}} what the file declares.
      */
-    function parseSpecProgress(text) {
-      const body = typeof text === 'string' ? text : ''
-      const boxes = [...body.matchAll(/^[ \t]*- \[([ xX])\]/gm)]
-      const title = /^#[ \t]+(.+?)[ \t]*$/m.exec(body)
+    function readEpicTicket(text) {
+      if (typeof text !== 'string') return { title: null, status: null, parent: null }
+      const { data } = readFrontmatter(text)
       return {
-        title: title === null ? '' : title[1].trim(),
-        tasks: boxes.length,
-        ticked: boxes.filter((match) => match[1].toLowerCase() === 'x').length,
-        criteria: countAcceptance(body),
+        title: stringOf(data, 'title'),
+        status: stringOf(data, 'status'),
+        parent: stringOf(data, 'parent'),
       }
     }
 
     /**
-     * The standalone specs, split by whether anything is left to do.
+     * Decide a ticket's displayed state.
      *
-     * These are the specs no story in the sprint file claims: refactors, style
-     * extractions, migrations. Most are finished, which is the point of showing
-     * them together -- the interesting ones are the few still open, and a spec
-     * written and never started is invisible everywhere else on the board because
-     * no tracking key exists to hang it on.
+     * A v7 story carries no status in `tickets.toml`; the state lives in its plan.
+     * So a ticket whose plan is missing has an *unknown* state, not a default one,
+     * and the board shows that rather than counting it as not started.
      *
-     * @param {Array<{file: string, text: string}>} specs - the unclaimed spec files.
-     * @returns {{lanes: object[], totals: object}} the lanes and their counts.
+     * @param {object|null} plan - from {@link readPlan}, or null.
+     * @returns {string|null} the status, or null when nothing declares one.
      */
-    function standaloneView(specs) {
-      const rows = (specs ?? []).map((spec) => {
-        const progress = parseSpecProgress(spec.text)
-        const slug = spec.file.split('/').pop().replace(/^spec-/, '').replace(/\.md$/, '')
-        const state =
-          progress.tasks === 0
-            ? REQ_STATE.unknown
-            : progress.ticked === progress.tasks
-              ? REQ_STATE.done
-              : progress.ticked === 0
-                ? REQ_STATE.todo
-                : REQ_STATE.partial
+    function ticketStatus(plan) {
+      if (plan === null || plan === undefined) return null
+      return plan.status
+    }
+
+    /**
+     * Assemble one initiative from the files read for it.
+     *
+     * @param {object} input - the initiative's name and file contents.
+     * @param {string} input.slug - the folder name, `initiative-<slug>`.
+     * @param {string} input.dir - its workspace-relative folder path.
+     * @param {string|null} input.ticket - contents of `initiative-<slug>.md`.
+     * @param {{epics: Array<object>}} input.index - the parsed epic index plus per-epic content.
+     * @param {number} input.unreadable - how many files could not be read.
+     * @returns {object} the initiative model.
+     */
+    function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
+      const own = readInitiativeTicket(ticket)
+      const built = epics.map((epic) => {
+        const header = readEpicTicket(epic.ticket)
+        const entries = readStoryIndex(epic.storyIndex)
+        const plans = (epic.plans ?? []).map((plan) => readPlan(plan.text, plan.path))
+        const { links, unlinked, orphans, missing } = linkPlans(entries, plans)
+
+        const tickets = entries.map((entry) => {
+          const plan = links.get(entry.id) ?? null
+          return {
+            id: entry.id,
+            ref: `${epic.id ?? '?'}.${entry.id}`,
+            type: entry.type,
+            title: entry.title,
+            v6Key: entry.v6Key,
+            status: ticketStatus(plan),
+            plan,
+            linkedBy: plan === null ? 'none' : plan.ticket === null ? 'name' : 'ticket',
+          }
+        })
+
         return {
-          id: slug,
-          name: progress.title === '' ? slug : progress.title,
-          state,
-          note: `${progress.ticked} of ${progress.tasks} tasks, ${progress.criteria} criteria`,
-          file: spec.file,
+          id: epic.id,
+          slug: epic.slug,
+          folder: epic.folder,
+          title: header.title ?? epic.title ?? epic.slug,
+          status: header.status,
+          tickets,
+          orphans,
+          unlinked: unlinked.length,
+          missing: missing.map((entry) => entry.id),
         }
       })
 
-      rows.sort((a, b) => a.state.localeCompare(b.state) || a.id.localeCompare(b.id))
-      const open = rows.filter((row) => row.state !== REQ_STATE.done)
-      const finished = rows.filter((row) => row.state === REQ_STATE.done)
-
-      const lanes = [
-        { code: 'OPEN', label: 'still open', rows: open, verifiable: true },
-        { code: 'DONE', label: 'finished', rows: finished, verifiable: true },
-      ].filter((lane) => lane.rows.length > 0)
-
-      return {
-        lanes,
-        totals: { declared: rows.length, open: open.length, done: finished.length },
-      }
-    }
-
-    /**
-     * Planning-artefact evidence: whether the architecture, brief and PRD are tied
-     * to the work, and to what.
-     *
-     * The three carry different proofs, so they are read differently:
-     *
-     * - **Architecture decisions** are cited by id. Story files name `AD-3` when
-     *   they implement it, which is an exact link and needs no guessing.
-     * - **Brief and PRD** are upstream documents with no vocabulary of their own.
-     *   The only link is the one the plan writes down, in the epics document's
-     *   `inputDocuments`.
-     *
-     * The trap is that this repository runs more than one planning track. `prd.md`
-     * is named by no part of the tools plan because it belongs to the i18n plan,
-     * which is correct and would still look like an orphan to a naive check. So a
-     * document is only reported when nothing in the plan carries it, and the finding
-     * says which plan was asked.
-     *
-     * @module dsh-plugin-bmad-sprint-board/planning
-     */
-
-    /** A directory in the planning folder that holds dated artefacts. */
-    const ARTEFACT_FAMILIES = ['architecture', 'briefs', 'ux-designs', 'research', 'epics-reviews']
-
-    /**
-     * The architecture decisions a spine declares.
-     *
-     * `### AD-3 - Shopify Metaobject CMS Backing`, with either a hyphen or an em
-     * dash after the id.
-     *
-     * @param {string} text - the contents of an architecture spine.
-     * @returns {Array<{id: string, title: string}>} the decisions, in document order.
-     */
-    function parseArchitectureDecisions(text) {
-      const found = String(text ?? '').matchAll(/^#{2,4}[ \t]+(AD-\d+)[ \t]*[-:\u2014]+[ \t]*(.+?)[ \t]*$/gm)
-      return [...found].map((match) => ({ id: match[1], title: match[2].trim() }))
-    }
-
-    /**
-     * Which stories and epics cite each decision.
-     *
-     * A story names `AD-3` because it is implementing that decision, so this is a
-     * declared link rather than an inferred one. A decision no story cites is
-     * reported, but not as undelivered: `AD-10` names the tri-state parser contract
-     * and story 1.3 is the tri-state parser, so the work can be plainly done while
-     * the id goes unquoted. The board cannot tell those apart, and says so.
-     *
-     * @param {Array<{id: string, title: string}>} decisions - from {@link parseArchitectureDecisions}.
-     * @param {Array<{key: string, epic: number, index: number}>} stories - the model's stories.
-     * @param {Map<string, string>} storyText - story path to contents.
-     * @returns {Map<string, {stories: string[], epics: number[]}>} keyed by decision id.
-     */
-    function linkDecisionsToEpics(decisions, stories, storyText) {
-      const byFile = new Map(stories.map((story) => [story.file, story]))
-      const links = new Map()
-
-      for (const decision of decisions) {
-        const hit = []
-        for (const [file, text] of storyText ?? []) {
-          const story = byFile.get(file)
-          if (story === undefined) continue
-          if (new RegExp(`\\b${decision.id}\\b`).test(text)) hit.push(story)
+      const byStatus = new Map()
+      let total = 0
+      let unknown = 0
+      for (const epic of built) {
+        for (const ticket of epic.tickets) {
+          total += 1
+          if (ticket.status === null) {
+            unknown += 1
+            continue
+          }
+          byStatus.set(ticket.status, (byStatus.get(ticket.status) ?? 0) + 1)
         }
-        links.set(decision.id, {
-          stories: hit.map((story) => story.key),
-          epics: [...new Set(hit.map((story) => story.epic))].sort((a, b) => a - b),
-        })
-      }
-
-      return links
-    }
-
-    /**
-     * The documents the plan declares as its inputs.
-     *
-     * Read from the epics document's `inputDocuments` list, which is the only place
-     * a brief or a PRD is tied to the work.
-     *
-     * @param {string} epicsText - the contents of the epics document.
-     * @returns {string[]} the declared paths, as written, since a caller opens them.
-     */
-    function parseDeclaredInputs(epicsText) {
-      const block = /^inputDocuments:[ \t]*\n((?:[ \t]*-[ \t]+.*\n)+)/m.exec(String(epicsText ?? ''))
-      if (block === null) return []
-      return [...block[1].matchAll(/^[ \t]*-[ \t]*['"]?(.+?)['"]?[ \t]*$/gm)]
-        // The block runs to the closing `---`, which the list pattern also matches.
-        .map((match) => match[1].trim())
-        .filter((path) => path !== '' && !/^-+$/.test(path))
-        .map((path) => path.replace(/^['"]|['"]$/g, ''))
-    }
-
-    /**
-     * Artefact directories present in the planning folder.
-     *
-     * @param {Array<{type: string, name: string}>} entries - the planning listing.
-     * @returns {string[]} the families present, in {@link ARTEFACT_FAMILIES} order.
-     */
-    function artefactFamilies(entries) {
-      const dirs = new Set(
-        (entries ?? []).filter((entry) => entry.type === 'directory').map((entry) => entry.name),
-      )
-      return ARTEFACT_FAMILIES.filter((family) => dirs.has(family))
-    }
-
-    /**
-     * Document-shaped markers a reader can recognise as one artefact or another.
-     *
-     * @param {string} path - a declared input path.
-     * @returns {string|null} the family it belongs to, or null.
-     */
-    function familyOf(path) {
-      const text = String(path ?? '').toLowerCase()
-      if (text.includes('architecture')) return 'architecture'
-      if (text.includes('brief')) return 'briefs'
-      if (text.includes('prd')) return 'prd'
-      if (text.includes('ux-design')) return 'ux-designs'
-      if (text.includes('research')) return 'research'
-      return null
-    }
-
-    /**
-     * The composed entry: read -> parse -> model -> detect -> gaps -> actions.
-     *
-     * Kept in its own module so the build can inline it: the shell needs the
-     * function, not the module graph, and `build.mjs` strips the imports below
-     * because every symbol is already in scope once the pieces are concatenated.
-     *
-     * @module dsh-plugin-bmad-sprint-board/analyse
-     */
-
-
-
-
-
-
-
-    /**
-     * Everything the board renders, from content the shell has already read.
-     *
-     * One entry point on purpose: the pieces have an order -- parse, model, detect,
-     * measure -- and a shell that reassembles them itself will eventually get the
-     * order wrong.
-     *
-     * @param {object} input - the workspace content.
-     * @param {string} input.sprintText - the tracking file's text.
-     * @param {string} [input.deferredText] - the deferred ledger's text.
-     * @param {Array<{type: string, name: string}>} [input.entries] - the story directory listing.
-     * @param {string} input.sprintPath - the tracking file's path, for relative resolution.
-     * @param {string} [input.epicsText] - `planning-artifacts/epics.md`, for the coverage map.
-     * @param {(path: string) => string|null|undefined} [input.readStory] - story-file reader.
-     * @param {Array<{type: string, name: string}>} [input.uxRuns] - the `ux-designs` listing.
-     * @param {string[]} [input.storyTexts] - the text of every story file read, for citation checks.
-     * @param {string} [input.spineText] - the architecture spine, for its decisions.
-     * @param {Array<{type: string, name: string}>} [input.planningEntries] - the planning folder listing.
-     * @param {string} [input.spineText] - the architecture spine, for its decisions.
-     * @param {Array<{type: string, name: string}>} [input.planningEntries] - the planning folder listing.
-     * @param {Array<{type: string, name: string}>} [input.uxRuns] - the `ux-designs` listing.
-     * @param {string[]} [input.storyTexts] - the text of every story file read, for citation checks.
-     * @param {string} [input.spineText] - the architecture spine, for its decisions.
-     * @param {Array<{type: string, name: string}>} [input.planningEntries] - the planning folder listing.
-     * @param {string} [input.spineText] - the architecture spine, for its decisions.
-     * @param {Array<{type: string, name: string}>} [input.planningEntries] - the planning folder listing.
-     * @param {string} [input.spineText] - the architecture spine, for its decisions.
-     * @param {Array<{type: string, name: string}>} [input.planningEntries] - the planning folder listing.
-     * @param {Array<{file: string, text: string}>} [input.standalone] - specs no tracking key claims.
-     * @returns {{model: object, gaps: object[], unverifiable: object[], bars: object, next: object, requirements: object}}
-     */
-    function analyse(input) {
-      const model = buildModel(
-        input.sprintText,
-        input.deferredText ?? '',
-        input.entries ?? [],
-        input.sprintPath,
-      )
-
-      const { gaps, unverifiable } = detect(model, { readStory: input.readStory })
-      // UX is a core requirement class and carries its own artefacts, so it gets its
-      // own detectors: a design run the plan does not carry, and a UX requirement no
-      // story names. Neither appears in the functional coverage map.
-      const uxRuns = detectUxRuns(input.uxRuns ?? [], input.epicsText ?? '')
-      // Keyed by story path, because the link runs component -> story -> epic and
-      // the epic only exists on the story record.
-      const storyFiles = new Map(
-        (input.storyFiles ?? []).map((entry) => [entry.file, entry.text]),
-      )
-      const decisions = parseArchitectureDecisions(input.spineText ?? '')
-      const decisionLinks = linkDecisionsToEpics(decisions, model.stories, storyFiles)
-      const uxRequirements = detectUxRequirements(
-        parseRequirementInventory(input.epicsText ?? ''),
-        model.stories,
-        storyFiles,
-      )
-      const coverage = parseFrCoverage(input.epicsText ?? '')
-      const inventory = parseRequirementInventory(input.epicsText ?? '')
-      const requirements = requirementBar(coverage, model.epics, inventory)
-
-      // The inventory holds more than the coverage map claims. Those requirements
-      // are declared and unowned, so nothing can say whether they were delivered --
-      // which is an unverifiable, not a silence.
-      const unowned = []
-      if (requirements.unmapped > 0) {
-        const classes = requirements.unmappedByClass
-          .map((group) => `${group.code} (${group.items.length})`)
-          .join(', ')
-        // One action, offered twice: as the card in the unverifiable lane and as the
-        // badge's button under the requirements bar. Two copies would drift.
-        requirements.unmappedAction = {
-          kind: 'prompt',
-          label: 'Ask why they are unmapped',
-          payload:
-            `/bmad-correct-course -- ${classes} are declared in epics.md but appear in no coverage map and are cited by ` +
-            'no story. Tell me whether each was delivered anyway, and whether the coverage map ' +
-            'should be extended or the requirements retired.',
-        }
-        unowned.push({
-          id: 'REQ',
-          subject: `${requirements.unmapped} requirements have no coverage map`,
-          reason:
-            `The inventory declares ${requirements.declared} requirements; the coverage map ` +
-            `claims ${requirements.total}. ${classes} are inventoried but mapped to no epic, ` +
-            'and no story cites them, so their delivery cannot be measured.',
-          action: requirements.unmappedAction,
-        })
       }
 
       return {
-        model,
-        standalone: standaloneView(input.standalone ?? []),
-        decisionTitles: new Map(decisions.map((decision) => [decision.id, decision.title])),
-        declaredInputs: parseDeclaredInputs(input.epicsText ?? ''),
-        artefactFamilies: artefactFamilies(input.planningEntries ?? []),
-        requirementView: requirementsView({
-          epicsText: input.epicsText ?? '',
-          coverage,
-          epics: model.epics,
-          stories: model.stories,
-          // Keyed by sprint path, the way the model records a story's file.
-          storyText: storyFiles,
-          decisions: decisionLinks,
-          decisionTitles: new Map(decisions.map((decision) => [decision.id, decision.title])),
-          uxLinks: linkUxToEpics(
-            parseRequirementInventory(input.epicsText ?? ''),
-            model.stories,
-            storyFiles,
+        slug,
+        dir,
+        title: own.title ?? slug,
+        status: own.status,
+        epics: built,
+        counts: {
+          epics: built.length,
+          tickets: total,
+          unknown,
+          byStatus,
+          settled: [...byStatus].filter(([status]) => SETTLED.has(status)).reduce((n, [, c]) => n + c, 0),
+          unlinkedPlans: built.reduce((n, epic) => n + epic.unlinked, 0),
+          orphanPlans: built.reduce((n, epic) => n + epic.orphans.length, 0),
+        },
+        unreadable,
+      }
+    }
+
+    /**
+     * Group an initiative's tickets into status lanes, in the published order.
+     *
+     * Tickets whose state nothing declares form their own lane rather than being
+     * folded into an existing one: "not started" and "cannot tell" are different
+     * claims, and a board that merges them cannot be trusted about either.
+     *
+     * @param {object} initiative - from {@link buildInitiative}.
+     * @returns {Array<{status: string|null, tickets: Array<object>}>} the lanes, settled last.
+     */
+    function statusLanes(initiative) {
+      const groups = new Map()
+      for (const epic of initiative.epics) {
+        for (const ticket of epic.tickets) {
+          const key = ticket.status
+          if (!groups.has(key)) groups.set(key, [])
+          groups.get(key).push({ ...ticket, epic: epic.slug, epicTitle: epic.title })
+        }
+      }
+
+      const rank = (status) => {
+        if (status === null) return STATUS_ORDER.length - 1
+        const index = STATUS_ORDER.indexOf(status)
+        return index === -1 ? STATUS_ORDER.length - 2 : index
+      }
+
+      return [...groups]
+        .map(([status, tickets]) => ({ status, tickets }))
+        .sort((a, b) => rank(a.status) - rank(b.status))
+    }
+
+    /**
+     * v7 checks: what the ticket store and the tickets on disk disagree about.
+     *
+     * The v6 detectors compared a sprint file against deferred work and review
+     * patches. v7 has no sprint file; the equivalents are the two records every
+     * ticket keeps -- the entry in `tickets.toml` and the plan file beside it -- and
+     * the statuses its containers claim.
+     *
+     * Two rules carry over from v6 unchanged:
+     *
+     *   1. **Nothing here writes.** The board is a reader.
+     *   2. **Unverifiable is not clean.** A check that could not be evaluated
+     *      returns an entry rather than nothing, because a board showing nothing
+     *      must never be confusable with a board that cannot see.
+     *
+     * @module dsh-plugin-bmad-sprint-board/detect
+     */
+
+
+
+    /** How much a gap matters, highest first. */
+    const SEVERITY = ['high', 'medium', 'low']
+
+    /**
+     * Build one gap in the shape every view renders.
+     *
+     * @param {object} spec - the gap's fields.
+     * @returns {object} the gap.
+     */
+    function gap({ id, title, severity, subject, subjectKind, evidence, action }) {
+      return { id, title, severity, subject, subjectKind, evidence, action }
+    }
+
+    /**
+     * A prompt that hands the finding back to the agent that owns the store.
+     *
+     * @param {string} text - the instruction.
+     * @returns {{kind: string, label: string, payload: string}} the action.
+     */
+    function ask(text) {
+      return { kind: 'prompt', label: 'Ask agent', payload: text }
+    }
+
+    /**
+     * Check one initiative against its tickets.
+     *
+     * @param {object} initiative - from `buildInitiative`.
+     * @returns {{gaps: Array<object>, unverifiable: Array<object>}} what disagrees.
+     */
+    function detectInitiative(initiative) {
+      const gaps = []
+      const unverifiable = []
+      const where = initiative.slug
+
+      // A plan the store does not link is invisible to `tickets.py`, which then
+      // reports the ticket as unstarted however finished the plan is. That is the
+      // single most misleading state a migrated project gets into, because every
+      // number the tooling prints is wrong while every file on disk looks correct.
+      if (initiative.counts.unlinkedPlans > 0) {
+        const example = initiative.epics.find((epic) => epic.unlinked > 0)
+        gaps.push(gap({
+          id: 'L1',
+          title: 'plans not linked in the ticket store',
+          severity: 'high',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence:
+            `${initiative.counts.unlinkedPlans} plan file(s) match a ticket by name, but no entry `
+            + `declares them with a ticket key -- so the store reports them as unstarted.`,
+          action: ask(
+            `In ${where}, the ticket store does not link ${initiative.counts.unlinkedPlans} plan file(s) `
+            + `to their entries. Add the entry id to each plan's frontmatter as \`ticket:\` `
+            + `(start with ${example?.folder ?? where}), then re-run \`tickets.py status\`.`,
           ),
+        }))
+      }
+
+      // An entry with no plan at all: the ticket exists in the index and nowhere
+      // else. Whether that means "not started" or "the plan is missing" cannot be
+      // told from the store, so it is reported as unverifiable rather than counted.
+      const noPlan = initiative.epics.flatMap((epic) =>
+        epic.tickets.filter((ticket) => ticket.plan === null).map((ticket) => ({ epic, ticket })))
+      if (noPlan.length > 0) {
+        unverifiable.push({
+          id: 'L2',
+          title: 'tickets with no plan file',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence: `${noPlan.length} ticket(s) have an index entry but no plan, so their state is unknown.`,
+          tickets: noPlan.map(({ ticket }) => ticket.ref),
+          action: ask(`Which of these are unstarted and which have a missing plan? ${noPlan.map(({ ticket }) => ticket.ref).join(', ')}`),
+        })
+      }
+
+      // A plan file nothing claims is either a renamed ticket or leftover work.
+      const orphans = initiative.epics.flatMap((epic) =>
+        epic.orphans.map((plan) => ({ epic, plan })))
+      if (orphans.length > 0) {
+        gaps.push(gap({
+          id: 'L3',
+          title: 'plans no ticket claims',
+          severity: 'medium',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence: `${orphans.length} plan file(s) correspond to no entry in any ticket index.`,
+          action: ask(
+            `These plan files in ${where} belong to no ticket index entry: `
+            + `${orphans.map(({ plan }) => plan.path).join(', ')}. Add the ticket or delete the file.`,
+          ),
+        }))
+      }
+
+      // A status word the board does not know is shown, but never counted as
+      // settled: guessing that an unfamiliar word means finished is how a board
+      // starts lying.
+      const odd = initiative.epics.flatMap((epic) =>
+        epic.tickets
+          .filter((ticket) => ticket.status !== null && !KNOWN_STATUS.has(ticket.status))
+          .map((ticket) => ({ epic, ticket })))
+      if (odd.length > 0) {
+        unverifiable.push({
+          id: 'L4',
+          title: 'unrecognised status words',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence: `${odd.length} ticket(s) carry a status this board does not recognise, so they are not counted either way.`,
+          tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.status})`),
+          action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.status}`).join(', ')}. Confirm what they mean.`),
+        })
+      }
+
+      // A container whose status is settled while its tickets are not is the classic
+      // migration artefact: the folder was closed, the work inside it was not.
+      for (const epic of initiative.epics) {
+        if (epic.status === null || !SETTLED.has(epic.status)) continue
+        const open = epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status))
+        if (open.length === 0) continue
+        gaps.push(gap({
+          id: 'C1',
+          title: 'epic settled with open tickets',
+          severity: 'high',
+          subject: epic.slug,
+          subjectKind: 'epic',
+          evidence: `the epic says ${epic.status}, but ${open.length} of its tickets are not settled.`,
+          action: ask(
+            `Epic ${epic.slug} is marked ${epic.status} while ${open.map((t) => t.ref).join(', ')} `
+            + `are not settled. Reopen the epic or close those tickets.`,
+          ),
+        }))
+      }
+
+      if (initiative.status !== null && SETTLED.has(initiative.status)) {
+        const open = initiative.epics.flatMap((epic) =>
+          epic.tickets.filter((ticket) => ticket.status !== null && !SETTLED.has(ticket.status)))
+        if (open.length > 0) {
+          gaps.push(gap({
+            id: 'C2',
+            title: 'initiative settled with open tickets',
+            severity: 'high',
+            subject: where,
+            subjectKind: 'initiative',
+            evidence: `the initiative says ${initiative.status}, but ${open.length} tickets inside it are not settled.`,
+            action: ask(
+              `Initiative ${where} is marked ${initiative.status} while ${open.length} tickets are open. `
+              + `Reopen it or settle the tickets.`,
+            ),
+          }))
+        }
+      }
+
+      return { gaps, unverifiable }
+    }
+
+    /**
+     * Check an initiative that declares no epics.
+     *
+     * @param {object} initiative - from `buildInitiative`.
+     * @returns {object|null} the gap, or null when the initiative has work.
+     */
+    function detectEmptyInitiative(initiative) {
+      if (initiative.counts.epics > 0) return null
+      return gap({
+        id: 'E1',
+        title: 'initiative declares no epics',
+        severity: 'low',
+        subject: initiative.slug,
+        subjectKind: 'initiative',
+        evidence: 'the initiative folder exists and its ticket store lists no epics.',
+        action: ask(
+          `Initiative ${initiative.slug} has no epics in its ticket store. Either it has not been sliced `
+          + `yet, or it is finished and can be archived.`,
+        ),
+      })
+    }
+
+    /**
+     * Read a BMAD v7 project through the workspace face.
+     *
+     * The file operations arrive as arguments, so the whole scan is exercised by the
+     * tests against fixture directories without a Host. Nothing here writes.
+     *
+     * The read plan mirrors the layout: config, then the initiative folders, then
+     * each initiative's epic index, then each epic's ticket index and plan files.
+     * Every read that fails contributes an "unreadable" record instead of throwing,
+     * because one missing file must not take the whole board down and a board that
+     * cannot see a file must say so.
+     *
+     * @module dsh-plugin-bmad-sprint-board/scan
+     */
+
+
+
+
+
+    /** How many reads the scan keeps in flight; the same figure the shell used. */
+    const READ_CONCURRENCY = 8
+
+    /** The folder-name prefix every v7 initiative carries. */
+    const INITIATIVE_PREFIX = 'initiative-'
+
+    /**
+     * Run `mapper` over `items` with at most `limit` in flight, preserving order.
+     *
+     * @param {Array<*>} items - the work items.
+     * @param {number} limit - how many may run at once.
+     * @param {function(*, number): Promise<*>} mapper - the async work.
+     * @returns {Promise<Array<*>>} the results, in input order.
+     */
+    async function mapLimit(items, limit, mapper) {
+      const results = new Array(items.length)
+      let next = 0
+      const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        for (;;) {
+          const index = next
+          next += 1
+          if (index >= items.length) return
+          results[index] = await mapper(items[index], index)
+        }
+      })
+      await Promise.all(workers)
+      return results
+    }
+
+    /**
+     * Join a workspace-directory path with a name.
+     *
+     * @param {string} dir - the directory, possibly empty for the workspace root.
+     * @param {string} name - the child's name.
+     * @returns {string} the joined path.
+     */
+    function join(dir, name) {
+      return dir === '' ? name : `${dir.replace(/\/+$/, '')}/${name}`
+    }
+
+    /**
+     * Read a file, treating a miss as absence rather than failure.
+     *
+     * Most files the scan wants are legitimately optional: an initiative with no
+     * epics has no `tickets.toml`, and a project with no personal overrides has no
+     * `config.user.toml`. Recording those as unreadable would fill the board with
+     * alarms about files that are correctly not there.
+     *
+     * @param {object} io - the workspace face.
+     * @param {string} path - the workspace-relative path.
+     * @param {AbortSignal|undefined} signal - cancellation.
+     * @returns {Promise<string|null>} the text, or null when absent or unreadable.
+     */
+    async function tryRead(io, path, signal) {
+      try {
+        return await io.read(path, signal)
+      } catch {
+        return null
+      }
+    }
+
+    /**
+     * List a directory, treating a miss as an empty listing.
+     *
+     * @param {object} io - the workspace face.
+     * @param {string} path - the workspace-relative path.
+     * @param {AbortSignal|undefined} signal - cancellation.
+     * @returns {Promise<Array<{name: string, type: string}>>} the entries.
+     */
+    async function tryList(io, path, signal) {
+      try {
+        return await io.list(path, signal)
+      } catch {
+        return []
+      }
+    }
+
+    /**
+     * Read one epic: its ticket index, its own file, and every plan beside them.
+     *
+     * @param {object} io - the workspace face.
+     * @param {string} initiativeDir - the initiative's folder.
+     * @param {{id: *, slug: string, title: string}} row - one row of the epic index.
+     * @param {AbortSignal|undefined} signal - cancellation.
+     * @param {Array<object>} unreadable - the list failures are appended to.
+     * @returns {Promise<object>} the epic's raw contents, for `buildInitiative`.
+     */
+    async function readEpic(io, initiativeDir, row, signal, unreadable) {
+      const folder = join(join(initiativeDir, 'tickets'), row.slug)
+      const [ticket, storyIndex, listing] = await Promise.all([
+        tryRead(io, join(folder, `${row.slug}.md`), signal),
+        tryRead(io, join(join(folder, 'tickets'), 'tickets.toml'), signal),
+        tryList(io, join(folder, 'tickets'), signal),
+      ])
+
+      const names = listing
+        .filter((entry) => entry.type === 'file' && entry.name.endsWith(PLAN_SUFFIX))
+        .map((entry) => entry.name)
+        .sort()
+
+      // A plan that the directory listing named and the reader could not open is a
+      // real problem -- it exists and its state is hidden -- so only this read is
+      // recorded when it fails.
+      const plans = await mapLimit(names, READ_CONCURRENCY, async (name) => {
+        const path = join(join(folder, 'tickets'), name)
+        const text = await tryRead(io, path, signal)
+        if (text === null) {
+          unreadable.push({ path, error: 'listed but unreadable' })
+          return null
+        }
+        return { path, text }
+      })
+
+      return { ...row, folder, ticket, storyIndex, plans: plans.filter(Boolean) }
+    }
+
+    /**
+     * Read one initiative.
+     *
+     * @param {object} io - the workspace face.
+     * @param {string} outputFolder - the resolved output folder.
+     * @param {string} name - the folder name, `initiative-<slug>`.
+     * @param {AbortSignal|undefined} signal - cancellation.
+     * @param {Array<object>} unreadable - the list failures are appended to.
+     * @returns {Promise<object>} the initiative model.
+     */
+    async function readInitiative(io, outputFolder, name, signal, unreadable) {
+      const dir = join(outputFolder, name)
+      const slug = name.slice(INITIATIVE_PREFIX.length)
+      const before = unreadable.length
+
+      const [ticket, indexText] = await Promise.all([
+        tryRead(io, join(dir, `${name}.md`), signal),
+        tryRead(io, join(join(dir, 'tickets'), 'tickets.toml'), signal),
+      ])
+
+      const rows = readEpicIndex(indexText)
+      const epics = await mapLimit(rows, READ_CONCURRENCY, (row) =>
+        readEpic(io, dir, row, signal, unreadable))
+
+      return buildInitiative({
+        slug,
+        dir,
+        ticket,
+        epics,
+        unreadable: unreadable.length - before,
+      })
+    }
+
+    /**
+     * Read every initiative in a v7 project.
+     *
+     * @param {object} io - `{read, list, stat}` bound to the session's workspace.
+     * @param {AbortSignal|undefined} signal - cancellation.
+     * @returns {Promise<object>} the version, the resolved config, every initiative, and what could not be read.
+     */
+    async function scanProject(io, signal) {
+      const unreadable = []
+
+      const layers = await Promise.all(
+        CONFIG_LAYERS.map((path) => tryRead(io, path, signal)),
+      )
+      const config = resolveConfig(layers)
+
+      // Without a declared output folder the project is either not BMAD or a v6
+      // install, and the files the board would need are not where it looks. Say so
+      // rather than showing an empty board.
+      const hasBmad = await io.stat('_bmad/config.toml', signal).then((r) => r.ok).catch(() => false)
+      const hasSprintStatus = await io
+        .stat('_bmad-output/implementation-artifacts/sprint-status.yaml', signal)
+        .then((r) => r.ok)
+        .catch(() => false)
+
+      if (config.outputFolder === null) {
+        return { version: hasBmad ? 'v6' : 'none', config, initiatives: [], unreadable }
+      }
+
+      const listing = await tryList(io, config.outputFolder, signal)
+      const names = listing
+        .filter((entry) => entry.type === 'directory' && entry.name.startsWith(INITIATIVE_PREFIX))
+        .map((entry) => entry.name)
+        .sort()
+
+      const initiatives = await mapLimit(names, READ_CONCURRENCY, (name) =>
+        readInitiative(io, config.outputFolder, name, signal, unreadable))
+
+      return {
+        version: detectedVersion({
+          config,
+          hasSprintStatus,
+          initiatives: initiatives.length,
         }),
-        gaps: [...gaps, ...uxRuns.gaps, ...uxRequirements.gaps],
-        unverifiable: [...unverifiable, ...unowned, ...uxRuns.unverifiable, ...uxRequirements.unverifiable],
-        requirements,
-        bars: bars(model, requirements),
-        next: nextAction(model),
+        config,
+        initiatives,
+        unreadable,
       }
     }
 
@@ -2598,34 +1553,6 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         ),
       );
     }
-
-    /**
-     * One story card, in either view.
-     * @param props - the story, the copy, and the file opener.
-     * @returns the card element.
-     */
-    function StoryCard({ t, story, tag, makeOpener }) {
-      let note = '';
-      if (story.file === null) note = t('noSpec');
-      else if (story.deferred > 0) note = t('deferredCount', { count: story.deferred });
-      return h(Card, {
-        id: `${story.epic}.${story.index}`,
-        tag,
-        title: story.title,
-        note,
-        onOpen: makeOpener(story.file),
-        openLabel: t('openSpec'),
-      });
-    }
-
-    // --- Frame components --------------------------------------------------
-
-    /**
-     * The tab's outer frame. The board owns the whole pane body, so the frame
-     * also carries the component-local stylesheet.
-     * @param props - the header element and the body element.
-     * @returns the root element.
-     */
     function BoardShell({ header, body }) {
       return h(
         'div',
@@ -2654,26 +1581,34 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
     }
 
     /**
-     * The header of a loaded board: identity, progress, and the view toggle.
-     * @param props - the model, its completion percentage, and the controls.
-     * @returns the header element.
-     */
-    /**
      * The four views this one tab switches between.
      *
-     * Requirements and specs used to be tabs of their own in the sidebar, which
-     * meant three entries in the launcher for one board and three separate
-     * snapshots of the same files. They are readings of the same artefacts, so
-     * they are views of the same tab.
+     * Status answers what is where, Epics answers how far each slice has come,
+     * Tickets answers what one ticket is, and Initiatives answers which project
+     * is on screen. They are readings of the same scan, so they are views of one
+     * tab rather than tabs of their own.
      */
-    const VIEWS = [
-      { id: 'status', label: 'viewStatus' },
-      { id: 'epic', label: 'viewEpic' },
-      { id: 'requirements', label: 'viewRequirements' },
-      { id: 'specs', label: 'viewSpecs' },
-    ];
+    const VIEWS = ['status', 'epic', 'tickets', 'initiatives'];
 
-    function BoardHeader({ t, model, bars, next, view, onView, onRefresh, refreshing }) {
+    /**
+     * The dictionary key for each view's segment label. Kept as a map rather
+     * than built from the id, because the id is an internal name while the key
+     * is prose that translators own.
+     */
+    const VIEW_LABELS = {
+      status: 'viewStatus',
+      epic: 'viewEpic',
+      tickets: 'viewTickets',
+      initiatives: 'viewInitiatives',
+    };
+
+    /**
+     * The header of a loaded board: the initiative, how much of it is settled,
+     * and the view toggle.
+     * @param props - the selected initiative, the current view, and the controls.
+     * @returns the header element.
+     */
+    function BoardHeader({ t, initiative, view, onView, onRefresh, refreshing }) {
       return h(
         'header',
         { className: 'bmad-sb-head' },
@@ -2681,7 +1616,11 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           'div',
           { className: 'bmad-sb-titlerow' },
           h('span', { className: 'bmad-sb-title' }, t('title')),
-          h('span', { className: 'bmad-sb-project' }, model.project),
+          h(
+            'span',
+            { className: 'bmad-sb-project', title: initiative.dir },
+            initiative.title,
+          ),
           h(
             'button',
             {
@@ -2694,75 +1633,51 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
             '\u21BB',
           ),
         ),
-        model.lastUpdated === '' && refreshing !== true
-          ? null
-          : h(
+        refreshing === true
+          ? h(
               'div',
               { className: 'bmad-sb-sub' },
-              model.lastUpdated === '' ? null : `${t('updated')} ${model.lastUpdated}`,
-              // The reading on screen is the previous one while a refresh runs.
-              // Saying so is the difference between stale and wrong.
-              refreshing === true
-                ? h(
-                    'span',
-                    { className: 'bmad-sb-refreshing', role: 'status' },
-                    h('span', { className: 'bmad-sb-spinner', 'aria-hidden': true }),
-                    t('refreshing'),
-                  )
-                : null,
-            ),
+              h(
+                'span',
+                { className: 'bmad-sb-refreshing', role: 'status' },
+                h('span', { className: 'bmad-sb-spinner', 'aria-hidden': true }),
+                t('refreshing'),
+              ),
+            )
+          : null,
         h(
           'div',
           { className: 'bmad-sb-metrics' },
           h(Bar, {
             t,
-            label: t('barStories'),
-            done: bars.stories.done,
-            total: bars.stories.total,
-            unknown: bars.stories.unverifiable,
+            label: t('barTickets'),
+            done: initiative.counts.settled,
+            total: initiative.counts.tickets,
+            unknown: initiative.counts.unknown,
+            // An initiative with no tickets has no denominator, and an empty
+            // track would read as "clean" about a measurement nobody made.
+            noData: initiative.counts.tickets === 0,
             tone: 'success',
           }),
-          h(Bar, {
-            t,
-            label: t('barRequirements'),
-            done: bars.requirements.done,
-            total: bars.requirements.total,
-            unknown: bars.requirements.unverifiable,
-            noData: bars.requirements.noData === true,
-            badge:
-              bars.requirements.unmapped > 0
-                ? t('unmappedNote', {
-                    count: bars.requirements.unmapped,
-                    declared: bars.requirements.declared,
-                  })
-                : '',
-            tone: 'info',
-          }),
         ),
-        h(NextLine, { t, next }),
         h(
           'div',
-          {
-            className: 'bmad-sb-seg',
-            role: 'group',
-            'aria-label': t('viewLabel'),
-          },
-          VIEWS.map((entry) =>
+          { className: 'bmad-sb-seg', role: 'group', 'aria-label': t('viewLabel') },
+          VIEWS.map((id) =>
             h(
               'button',
               {
-                key: entry.id,
+                key: id,
                 type: 'button',
-                'aria-pressed': view === entry.id,
-                onClick: () => onView(entry.id),
+                'aria-pressed': view === id,
+                onClick: () => onView(id),
               },
-              t(entry.label),
+              t(VIEW_LABELS[id]),
             ),
           ),
         ),
       );
     }
-
 
     /**
      * What a board that could not read its files shows instead. This is a real
@@ -2790,345 +1705,42 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
     }
 
     /**
-     * What a workspace with no sprint tracking file shows. Nothing went wrong,
-     * so this explains what was looked for and where, instead of reporting a
-     * failure the reader cannot act on.
-     * @param props - the search shape and the retry action.
-     * @returns the empty-state element.
+     * What the board shows when there is no v7 project to draw: an older
+     * project, no project at all, or an output folder holding no initiative.
+     * None of these is a read failure, so each one names its own case and what
+     * to do about it instead of offering an empty board.
+     * @param props - the detected case and the retry action.
+     * @returns the notice element.
      */
-    function NoSprintFile({ t, searched, onRetry }) {
+    function VersionNotice({ t, version, onRetry }) {
+      const title =
+        version === 'v6'
+          ? t('v6.title')
+          : version === 'empty'
+            ? t('noInitiatives.title')
+            : t('noBmad.title');
+      const body =
+        version === 'v6'
+          ? t('v6.body')
+          : version === 'empty'
+            ? t('noInitiatives.body')
+            : t('noBmad.body');
       return h(
         'div',
         { className: 'bmad-sb-scroll' },
         h(
           'div',
           { className: 'bmad-sb-empty', role: 'status' },
-          h('span', { className: 'bmad-sb-emptytitle' }, t('noSprint.title')),
-          h(
-            'span',
-            { className: 'bmad-sb-cardnote' },
-            t('noSprint.body', { names: SPRINT_FILENAMES.join(', ') }),
-          ),
-          h(
-            'span',
-            { className: 'bmad-sb-cardnote' },
-            t('noSprint.searched', {
-              candidates: searched.candidates,
-              depth: searched.depth,
-            }),
-          ),
+          h('span', { className: 'bmad-sb-emptytitle' }, title),
+          h('span', { className: 'bmad-sb-cardnote' }, body),
           h(
             'button',
             { type: 'button', className: 'bmad-sb-btn', onClick: onRetry },
-            t('noSprint.retry'),
+            t('retry'),
           ),
         ),
       );
     }
-
-    // --- Board views -------------------------------------------------------
-
-    /**
-     * One status lane in the Status view.
-     * @param props - the status, its stories, fold state, and click behaviour.
-     * @returns the lane section.
-     */
-    function StatusLane({ t, status, stories, collapsed, onToggle, makeOpener }) {
-      return h(
-        'section',
-        { className: 'bmad-sb-lane', 'aria-label': t(`status.${status}`) },
-        h(LaneHeader, {
-          label: t(`status.${status}`),
-          token: STATUS_TOKEN[status] ?? IDLE_TOKEN,
-          count: stories.length,
-          collapsed,
-          onToggle,
-        }),
-        h(
-          Fold,
-          { collapsed },
-          h(
-            'div',
-            { className: 'bmad-sb-cards' },
-            stories.map((story) =>
-              h(StoryCard, {
-                key: story.key,
-                t,
-                story,
-                // The status view names the epic, so the badge carries the
-                // epic's own state; the epic view names the story's status.
-                tag: `E${story.epic}`,
-                tagTone: toneOf(story.epicStatus),
-                makeOpener,
-              }),
-            ),
-          ),
-        ),
-      );
-    }
-
-    /**
-     * The Status view: one lane per status that has stories, in workflow order.
-     * @param props - the model, the fold set, and the click behaviour.
-     * @returns the lane sections.
-     */
-    function StatusLanes({ t, model, folded, onFlip, makeOpener, insertAfter, insert }) {
-      const present = STATUS_ORDER.filter((status) =>
-        model.stories.some((story) => story.status === status),
-      );
-
-      const lanes = present.map((status) => {
-        const closedByDefault = status === 'done';
-        return h(StatusLane, {
-          key: status,
-          t,
-          status,
-          stories: model.stories.filter((story) => story.status === status),
-          collapsed: isFolded(folded, status, closedByDefault),
-          onToggle: foldHandler(onFlip, status, closedByDefault),
-          makeOpener,
-        });
-      });
-
-      if (insert === undefined) return lanes;
-      // What is finished is read before what is wrong with it, so the gaps sit
-      // after the Done lane rather than above every lane. When nothing is done
-      // yet there is no such lane, and the section closes the list instead.
-      const at = present.indexOf(insertAfter);
-      const cut = at === -1 ? lanes.length : at + 1;
-      return [...lanes.slice(0, cut), insert, ...lanes.slice(cut)];
-    }
-
-    /**
-     * One epic swimlane in the Epic view.
-     * @param props - the epic, its stories, fold state, and click behaviour.
-     * @returns the epic section.
-     */
-    function EpicSection({ t, epic, stories, collapsed, onToggle, makeOpener }) {
-      const percent =
-        epic.total === 0 ? 0 : Math.round((epic.done / epic.total) * 100);
-      return h(
-        'section',
-        {
-          className: 'bmad-sb-epicsec',
-          'aria-label': `${t('epicLabel')} ${epic.number}`,
-        },
-        h(
-          'div',
-          { className: 'bmad-sb-epichead' },
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'bmad-sb-lanehead',
-              'aria-expanded': !collapsed,
-              onClick: onToggle,
-            },
-            h('span', {
-              className: 'bmad-sb-dot',
-              style: {
-                background: `var(${STATUS_TOKEN[epic.status] ?? IDLE_TOKEN})`,
-              },
-              'aria-hidden': true,
-            }),
-            h(
-              'span',
-              { className: 'bmad-sb-epicname' },
-              `${t('epicLabel')} ${epic.number}`,
-            ),
-            h(
-              'span',
-              { className: 'bmad-sb-count' },
-              `${epic.done}/${epic.total}`,
-            ),
-            h(
-              'span',
-              { className: 'bmad-sb-chev', 'aria-hidden': true },
-              collapsed ? CHEVRON_CLOSED : CHEVRON_OPEN,
-            ),
-          ),
-        ),
-        h(
-          'div',
-          { className: 'bmad-sb-sub' },
-          h('span', null, t(`status.${epic.status}`) || epic.status),
-          epic.retro === ''
-            ? null
-            : h('span', null, `${t('retroLabel')}: ${epic.retro}`),
-          h(
-            'span',
-            { className: 'bmad-sb-bar', 'aria-hidden': true },
-            h('span', { style: { width: `${percent}%` } }),
-          ),
-        ),
-        h(
-          Fold,
-          { collapsed },
-          h(
-            'div',
-            { className: 'bmad-sb-cards' },
-            stories.map((story) =>
-              h(StoryCard, {
-                key: story.key,
-                t,
-                story,
-                tag: t(`status.${story.status}`) || story.status,
-                tagTone: toneOf(story.status),
-                makeOpener,
-              }),
-            ),
-          ),
-        ),
-      );
-    }
-
-    /**
-     * The Epic view: one swimlane per epic, with its own progress and retro state.
-     * @param props - the model, the fold set, and the click behaviour.
-     * @returns the epic sections.
-     */
-    function EpicSections({ t, model, folded, onFlip, makeOpener }) {
-      return model.epics.map((epic) => {
-        // A finished epic is the least likely to need its stories listed, so it
-        // starts folded; an epic still in flight starts open.
-        const closedByDefault = epic.status === 'done';
-        return h(EpicSection, {
-          key: epic.key,
-          t,
-          epic,
-          stories: model.stories.filter((story) => story.epic === epic.number),
-          collapsed: isFolded(folded, epic.number, closedByDefault),
-          onToggle: foldHandler(onFlip, epic.number, closedByDefault),
-          makeOpener,
-        });
-      });
-    }
-
-    /**
-     * The retrospective action items: the open ones, then a completed count.
-     * @param props - the model and the click behaviour.
-     * @returns the section's elements.
-     */
-    function ActionLane({ t, model, makeOpener, collapsed, onToggle }) {
-      const cards = model.openActions.map((item) =>
-        h(Card, {
-          key: item.id,
-          id: '',
-          tag: item.owner,
-          // An open item wants attention; one being worked is simply in flight.
-          tagTone: toneOf(item.status),
-          title: item.action,
-          note: item.status === 'in-progress' ? t('status.in-progress') : '',
-          onOpen: makeOpener(item.ref === '' ? null : item.ref),
-          openLabel: t('openRetro'),
-          // A retrospective commitment is work somebody agreed to do, so it
-          // carries the same kind of action the gaps do. It is a request rather
-          // than a command: the board knows what was promised, not how to keep it.
-          footer: h(CopyButton, {
-            t,
-            label:
-              item.status === 'in-progress'
-                ? t('finishActionItem')
-                : t('takeActionItem'),
-            value:
-              `/bmad-build -- ${item.action}\n\n` +
-              `Owner: ${item.owner === '' ? 'unassigned' : item.owner}\n` +
-              `Status: ${item.status}\n` +
-              (item.ref === '' ? '' : `Source: ${item.ref}\n`) +
-              '\nThis is an open action item from a retrospective. Take it on, or tell me ' +
-              'why it should be closed.',
-          }),
-        }),
-      );
-      // A lane, like every other list on the board: the count sits in the
-      // header with the rest, and the settled total rides underneath.
-      return h(CardLane, {
-        label: t('actionsTitle'),
-        token: cards.length === 0 ? IDLE_TOKEN : WARN_TOKEN,
-        cards,
-        collapsed,
-        onToggle,
-        empty: t('noOpenActions'),
-        count: `${cards.length} / ${cards.length + model.doneActionCount}`,
-        countTitle: t('actionsCount', {
-          open: cards.length,
-          done: model.doneActionCount,
-        }),
-        note: t('actionsDone', { count: model.doneActionCount }),
-      });
-    }
-
-    /**
-     * The deferred-work ledger. An entry with no `source_spec` opens the ledger
-     * itself, wherever the workspace keeps it.
-     * @param props - the model, the ledger's path, and the click behaviour.
-     * @returns the section's elements.
-     */
-    function DeferredLane({ t, model, ledgerPath, makeOpener, collapsed, onToggle }) {
-      const cards = model.deferred.map((item, index) =>
-        h(Card, {
-          key: item.id === '' ? `deferred-${index}` : item.id,
-          id: item.id,
-          // An entry that names a story's spec carries that story's board id,
-          // so the chip matches the id on the story's own card.
-          storyTag:
-            item.story === null
-              ? undefined
-              : {
-                  label: `\u21B3 ${item.story.epic}.${item.story.index}`,
-                  title: t('deferredFrom', {
-                    id: `${item.story.epic}.${item.story.index}`,
-                  }),
-                  // The reference takes the referenced story's own state, so the
-                  // chip says at a glance what the entry hangs off.
-                  tone: toneOf(item.story.status),
-                },
-          tag: item.source,
-          tagTone: 'neutral',
-          title: item.title,
-          note: item.file === '' ? item.spec : item.file,
-          onOpen: makeOpener(item.spec === '' ? ledgerPath : item.spec),
-          openLabel: t('openSpec'),
-          // A deferral is a decision somebody already made, so the board does not
-          // assume it should be undone. It states what was shelved and asks.
-          footer: h(CopyButton, {
-            t,
-            label: t('deferredAction'),
-            // Ledger entries are sparse: some carry an id and a source, some
-            // only a sentence. Every empty field is dropped rather than printed
-            // as a blank, so the request reads the same either way.
-            value: [
-              `/bmad-build -- ${item.title}`,
-              '',
-              item.source === '' ? null : `Source: ${item.source}`,
-              item.story === null
-                ? null
-                : `Deferred from: ${item.story.epic}.${item.story.index}`,
-              item.spec === '' ? null : `Spec: ${item.spec}`,
-              item.file === '' ? null : `Related file: ${item.file}`,
-              '',
-              'This was deferred deliberately. Tell me whether to pick it up now, keep it',
-              'deferred, or drop it. If it should be picked up, implement it.',
-            ]
-              .filter((line) => line !== null)
-              .join('\n')
-              .replace(/\n{3,}/g, '\n\n'),
-          }),
-        }),
-      );
-      return h(CardLane, {
-        label: t('deferredTitle'),
-        // Deferred work is recorded and accepted, not urgent: the same neutral
-        // the backlog wears, because neither is being worked right now.
-        token: IDLE_TOKEN,
-        cards,
-        collapsed,
-        onToggle,
-        empty: t('noDeferred'),
-      });
-    }
-
-    // --- Interaction helpers -----------------------------------------------
 
     /**
      * Build a card's open action.
@@ -3137,6 +1749,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
      * @param path - the file to open, or null when the card has none.
      * @returns the click handler, or nothing for a card with no file.
      */
+
     function openHandler(actions, fileAddress, path) {
       if (path === null || path === undefined) return;
       return () => actions.openResource(fileAddress(path));
@@ -3172,206 +1785,6 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         });
       };
     }
-
-    /**
-     * Find the tracking file in the Session's workspace and fold everything it
-     * names into one model. The deferred ledger and the spec listing are
-     * optional: a workspace without them still gets a board, just a thinner one.
-     * A workspace with no tracking file at all is reported as missing rather
-     * than as a failure, because nothing went wrong.
-     * @param readers - the injected workspace readers.
-     * @param sessionId - the Session whose workspace to read.
-     * @param signal - cancellation for this read.
-     * @returns the board model, or a missing marker naming what was searched.
-     */
-    /**
-     * Run an async mapper over a list with a ceiling on how many run at once.
-     *
-     * The reads this board makes are round-trips to the Host's workspace face,
-     * and they were issued one after another: thirty small files cost thirty
-     * sequential waits. Firing all thirty at once would be faster still and
-     * needlessly rude to the far side, so they go in waves.
-     *
-     * @param items - the list to map.
-     * @param limit - how many run concurrently.
-     * @param mapper - async function of one item.
-     * @returns the results, in input order.
-     */
-    async function mapLimit(items, limit, mapper) {
-      const results = new Array(items.length);
-      let next = 0;
-      const worker = async () => {
-        while (next < items.length) {
-          const index = next;
-          next += 1;
-          results[index] = await mapper(items[index], index);
-        }
-      };
-      const workers = [];
-      for (let i = 0; i < Math.min(limit, items.length); i += 1) workers.push(worker());
-      await Promise.all(workers);
-      return results;
-    }
-
-    async function loadBoardModel(
-      { readWorkspaceFile, listWorkspaceDir, stat },
-      sessionId,
-      signal,
-    ) {
-      const readers = { stat, list: listWorkspaceDir };
-
-      // BMAD declares where its modules write, and a project may move those
-      // folders, so the declaration is read first. The candidate probe and the
-      // bounded scan remain, but as the fallback for when config is absent.
-      const configPath = await firstExistingFile(stat, ['_bmad/config.toml'], signal);
-      const declarations =
-        configPath === null
-          ? { implementation: null, planning: null, knowledge: null }
-          : artifactPaths(
-              parseBmadConfig(await readWorkspaceFile(configPath, signal).catch(() => '')),
-            );
-
-      const sprintPath = await locateSprintPath(readers, sessionId, signal);
-      if (sprintPath === null) {
-        return {
-          missing: true,
-          searched: {
-            candidates: SPRINT_CANDIDATES.length * SPRINT_FILENAMES.length,
-            depth: SCAN_MAX_DEPTH,
-          },
-        };
-      }
-
-      const sprintText = await readWorkspaceFile(sprintPath, signal);
-      const sprintDir = dirOf(sprintPath);
-      const storyLocation = (parseSprintStatus(sprintText).meta.story_location ?? '').trim();
-      const storyDir = storyLocation || sprintDir;
-
-      // The ledger sits with the story files in every layout seen so far, and
-      // beside the tracking file in the rest; probe both rather than guess.
-      const deferredPath = await firstExistingFile(
-        stat,
-        [under(storyDir, 'deferred-work.md'), under(sprintDir, 'deferred-work.md')],
-        signal,
-      );
-      // Nothing below depends on anything else below until the model is built,
-      // so the ledger, the listing, the plan and the UX runs go out together.
-      const [deferredText, entries, epicsRead, planningEntries, uxListing] = await Promise.all([
-        deferredPath === null
-          ? Promise.resolve('')
-          : readWorkspaceFile(deferredPath, signal).catch(() => ''),
-        listWorkspaceDir(storyDir, signal).catch(() => []),
-        declarations.planning === null
-          ? Promise.resolve({ path: null, text: '' })
-          : firstExistingFile(stat, [under(declarations.planning, 'epics.md')], signal).then(
-              (path) =>
-                path === null
-                  ? { path: null, text: '' }
-                  : readWorkspaceFile(path, signal)
-                      .catch(() => '')
-                      .then((text) => ({ path, text })),
-            ),
-        declarations.planning === null
-          ? Promise.resolve([])
-          : listWorkspaceDir(declarations.planning, signal).catch(() => []),
-        declarations.planning === null
-          ? Promise.resolve([])
-          : listWorkspaceDir(under(declarations.planning, UX_DIR), signal).catch(() => []),
-      ]);
-
-      const epicsPath = epicsRead.path;
-      const epicsText = epicsRead.text;
-      const uxRuns = parseUxRuns(uxListing);
-      const model = buildModel(sprintText, deferredText, entries, sprintPath);
-
-      // The spine is reached through the plan's own declaration rather than a
-      // guessed path: whatever epics.md lists as an architecture input is what
-      // gets read, and a project that lists none simply has no such lane.
-      const declaredInputs = parseDeclaredInputs(epicsText);
-      const spinePath =
-        declaredInputs.find((path) => /architecture/i.test(path) && /\.md$/i.test(path)) ?? null;
-      const spineText =
-        spinePath === null ? '' : await readWorkspaceFile(spinePath, signal).catch(() => '');
-
-      // The core cannot read files, so the shell reads every story file the
-      // detectors may need and hands over the text. B3 only asks about finished
-      // stories, but U2 asks whether any story cites a UX requirement, so all of
-      // them are read.
-      const storyText = new Map(
-        await mapLimit(
-          model.stories.filter((story) => story.file !== null),
-          READ_CONCURRENCY,
-          async (story) => {
-            try {
-              return [story.file, await readWorkspaceFile(story.file, signal)];
-            } catch {
-              return [story.file, null]; // present but unreadable, not absent
-            }
-          },
-        ),
-      );
-      const readStory = (path) => (storyText.has(path) ? storyText.get(path) : undefined);
-
-      // Specs no story claims. The sprint file is silent about them, so the
-      // directory listing is the only place they exist, and the file itself is
-      // the only place their progress does.
-      const claimed = new Set(
-        model.stories
-          .map((story) => story.file)
-          .filter((file) => typeof file === 'string')
-          .map((file) => file.split('/').pop()),
-      );
-      const unclaimed = entries
-        .filter(
-          (entry) =>
-            entry.type === 'file' && /^spec-.*\.md$/.test(entry.name) && !claimed.has(entry.name),
-        )
-        .map((entry) => (storyDir === '' ? entry.name : `${storyDir}/${entry.name}`));
-      const standalone = await mapLimit(unclaimed, READ_CONCURRENCY, async (file) => ({
-        file,
-        text: await readWorkspaceFile(file, signal).catch(() => ''),
-      }));
-
-      return {
-        analysis: analyse({
-          sprintText,
-          deferredText,
-          entries,
-          sprintPath,
-          epicsText,
-          uxRuns,
-          spineText,
-          standalone,
-          planningEntries,
-          storyTexts: [...storyText.values()].filter((t) => typeof t === 'string'),
-          storyFiles: [...storyText.entries()].map(([file, text]) => ({ file, text })),
-          readStory,
-        }),
-        deferredPath,
-        coveragePath: epicsPath,
-        declarations,
-      };
-    }
-
-    /**
-     * The first path in a list that names an existing file.
-     * @param stat - the injected workspace stat reader.
-     * @param paths - candidate workspace-relative paths, in preference order.
-     * @param signal - caller cancellation.
-     * @returns the first existing path, or null when none is there.
-     */
-    async function firstExistingFile(stat, paths, signal) {
-      for (const path of paths) {
-        if (await fileExists(stat, path, signal)) return path;
-      }
-      return null;
-    }
-
-    /**
-     * The failure snapshot for one rejected read.
-     * @param error - whatever the read threw.
-     * @returns the error snapshot.
-     */
     function failureSnapshot(error) {
       return {
         phase: 'error',
@@ -3490,62 +1903,6 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
             ),
       );
     }
-
-    /**
-     * The framework's own recommendation, rendered rather than reinvented. One
-     * answer with its reason: a board that offers three has not answered.
-     * @param props - the recommendation and the copy.
-     * @returns the next-action line, or null when there is nothing to do.
-     */
-    function NextLine({ t, next }) {
-      if (next === null || next.skill === null) {
-        return h('div', { className: 'bmad-sb-next', 'data-kind': 'done' }, t('allDone'));
-      }
-      return h(
-        'div',
-        { className: 'bmad-sb-next', 'data-kind': 'action' },
-        h('span', { className: 'bmad-sb-nextlabel' }, t('nextLabel')),
-        h('span', { className: 'bmad-sb-nextskill' }, next.skill),
-        h('span', { className: 'bmad-sb-nextkey' }, next.label || next.key),
-        h('span', { className: 'bmad-sb-nextreason' }, next.reason),
-        // The recommendation is the most actionable thing on the board, so it
-        // carries an action too rather than sitting there as a sentence.
-        next.action === null || next.action === undefined
-          ? null
-          : h(CopyButton, {
-              t,
-              label: next.action.label,
-              value: next.action.payload,
-            }),
-      );
-    }
-
-    /**
-     * The gaps, then the things the board could not check. Unverifiable is a
-     * separate list on purpose: it must never be filtered, dimmed, or collapsed
-     * into the clean state, because a board showing nothing looks identical to a
-     * board that cannot see.
-     * @param props - the gaps, the unverifiable entries, and the copy.
-     * @returns the gaps section, or null when there is nothing to report.
-     */
-    /**
-     * A lane's body, folded open or shut.
-     *
-     * The cards stay mounted while collapsed, because an animation needs
-     * something to animate. Height is always an explicit pixel value, measured
-     * from the content and re-measured when the content resizes. That keeps the
-     * transition a plain CSS interpolation between two lengths.
-     *
-     * Two approaches were tried and rejected. `grid-template-rows: 0fr -> 1fr`
-     * is the usual recipe and does not survive this page: the scroll ancestor
-     * carries a definite height, and a `1fr` row whose item clips resolves to
-     * zero, so the lane stayed shut however the attribute was set. Collapsing
-     * from `auto` needs the height pinned for one frame first, and that frame
-     * came from `requestAnimationFrame`, which never fires in a background tab.
-     *
-     * @param props - whether it is shut, and the cards.
-     * @returns the folding body.
-     */
     function Fold({ collapsed, children }) {
       const inner = React.useRef(null);
       const [contentHeight, setContentHeight] = React.useState(0);
@@ -3660,8 +2017,10 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         h(Card, {
           key: `${item.id}:${item.subject}`,
           id: item.id,
+          tag: item.title,
+          tagTone: 'warning',
           title: item.subject,
-          note: item.reason,
+          note: item.evidence,
           footer: h(CopyButton, {
             t,
             label: t('askAnAgent'),
@@ -3792,12 +2151,41 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
      */
     const SNAPSHOT_CACHE = new Map();
 
-    function useSprintSnapshot({
-      readers,
-      sessionId,
-      tabSignal,
-      revision,
-    }) {
+    /**
+     * Read a whole workspace file, page by page.
+     *
+     * The Remote read returns one page and says whether it reached the end. A
+     * ticket index or plan longer than one page would otherwise be silently
+     * truncated, and the board would report the unseen tail as absent.
+     *
+     * @param face - the `workspaceFiles` Remote namespace.
+     * @param sessionId - the Session whose workspace resolves the path.
+     * @param path - the workspace-relative path.
+     * @param signal - cancellation.
+     * @returns {Promise<string>} the whole text.
+     */
+    async function readWholeFile(face, sessionId, path, signal) {
+      const parts = [];
+      let offset = 1;
+      for (;;) {
+        const result = await face.read(sessionId, path, { offset }, signal);
+        if (!result.ok) throw result.error;
+        const page = result.value;
+        parts.push(page.text);
+        if (page.eof) return parts.join('\n');
+        offset += Math.max(page.lines, 1);
+      }
+    }
+
+    /**
+     * Read the BMAD project once per revision, cancelling on unmount or when the
+     * tab occurrence ends. The readers are bound once per occurrence, so the
+     * revision counter and the tab's own lifetime are the only inputs that
+     * re-run the scan.
+     * @param props - the injected readers and the tab's lifetime signal.
+     * @returns the load snapshot: loading, ready with a scan, or failed.
+     */
+    function useSprintSnapshot({ io, sessionId, tabSignal, revision }) {
       // Start from what we already know, already marked as being refreshed.
       const [snapshot, setSnapshot] = React.useState(() => {
         const cached = SNAPSHOT_CACHE.get(sessionId);
@@ -3815,23 +2203,10 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         // nothing, the spinner is the only honest thing on screen.
         setSnapshot(cached === undefined ? { phase: 'loading' } : { ...cached, refreshing: true });
 
-        loadBoardModel(readers, sessionId, controller.signal).then(
-          (outcome) => {
+        scanProject(io, controller.signal).then(
+          (board) => {
             if (!live) return;
-            if (outcome.missing === true) {
-              SNAPSHOT_CACHE.delete(sessionId);
-              setSnapshot({ phase: 'missing', searched: outcome.searched });
-              return;
-            }
-            const next = {
-              phase: 'ready',
-              ...outcome.analysis,
-              deferredPath: outcome.deferredPath,
-              coveragePath: outcome.coveragePath,
-              declarations: outcome.declarations,
-              readAt: Date.now(),
-              refreshing: false,
-            };
+            const next = { phase: 'ready', board, readAt: Date.now(), refreshing: false };
             SNAPSHOT_CACHE.set(sessionId, next);
             setSnapshot(next);
           },
@@ -3839,8 +2214,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
             if (!live) return;
             const previous = SNAPSHOT_CACHE.get(sessionId);
             // A refresh that fails keeps the last good reading and says so. A
-            // blank board would be a worse lie than a dated one, and a dated
-            // one that does not admit it is dated is worse still.
+            // blank board would be a worse lie than a dated one.
             setSnapshot(
               previous === undefined
                 ? failureSnapshot(error)
@@ -3854,210 +2228,307 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           tabSignal.removeEventListener('abort', onTabGone);
           controller.abort();
         };
-      }, [revision, tabSignal, readers, sessionId]);
+      }, [revision, tabSignal, io, sessionId]);
 
       return snapshot;
     }
 
-    // --- The tab body ------------------------------------------------------
+    // --- Views -------------------------------------------------------------
 
     /**
-     * The board body: reads the three files, then renders the board.
-     * @param props - framework-bound tab identity, `t`, and the injected readers.
-     * @returns the tab's content.
-     */
-    /**
-     * The colour a requirement lane's count wears, by what the lane contains.
+     * A v7 status mapped to the theme token that carries its marker colour.
      *
-     * A lane of finished requirements is green, a lane with work left is blue,
-     * one that has not started is neutral, and one with no evidence anywhere is
-     * amber -- the same amber the summary gives its "no evidence" total, because
-     * that is a finding rather than an absence.
-     *
-     * @param lane - the lane, with its rows and whether it is verifiable.
+     * The words are `STATUS_ORDER` plus the unknown lane: grey while nothing is
+     * moving, blue while it is, amber while someone is reviewing, solid error red
+     * when blocked, green once settled. The mapping lives in the shell because a
+     * theme token may not enter the core.
+     * @param status - a ticket or container status, or null when none is declared.
      * @returns a theme token name.
      */
-    function requirementLaneToken(lane) {
-      if (lane.verifiable !== true) return WARN_TOKEN;
-      if (lane.rows.length === 0) return IDLE_TOKEN;
-      const done = lane.rows.filter((row) => row.state === 'done').length;
-      if (done === lane.rows.length) return '--dsw-alias-state-success-primary';
-      return done === 0 ? IDLE_TOKEN : '--dsw-alias-state-business-primary';
+    function statusToken(status) {
+      if (status === 'blocked') return '--dsw-alias-state-error-primary';
+      if (status === 'in-progress' || status === 'built') {
+        return '--dsw-alias-state-business-primary';
+      }
+      if (status === 'review') return WARN_TOKEN;
+      if (status === 'done') return '--dsw-alias-state-success-primary';
+      if (status === null) return WARN_TOKEN;
+      return IDLE_TOKEN;
     }
 
-    /** One requirement row: a state mark, the id, the name, and the note. */
-    function RequirementRow({ row }) {
-      const mark =
-        row.state === 'done'
-          ? '\u2713'
-          : row.state === 'partial'
-            ? '\u25D1'
-            : row.state === 'todo'
-              ? '\u2717'
-              : '\u25CB';
+    /**
+     * The tag tone a status wears on a card. A tag is quieter than a lane dot,
+     * so settled work is tinted rather than filled.
+     * @param status - a ticket status, or null when none is declared.
+     * @returns a tag tone.
+     */
+    function statusTone(status) {
+      if (status === 'done') return 'success';
+      if (status === 'blocked') return 'error';
+      if (status === 'review') return 'warning';
+      if (status === 'in-progress' || status === 'built') return 'info';
+      if (status === null) return 'warning';
+      return 'neutral';
+    }
+
+    /**
+     * The displayed name of a status, including the unknown lane.
+     *
+     * A status word the dictionary does not know is shown as the word itself.
+     * Translating it is impossible, and folding it into a generic label would
+     * lose exactly the finding the detector reports.
+     * @param t - the bound dictionary.
+     * @param status - a status, or null when none is declared.
+     * @returns the label.
+     */
+    function statusLabel(t, status) {
+      if (status === null) return t('status.unknown');
+      const key = `status.${status}`;
+      const label = t(key);
+      return label === key ? status : label;
+    }
+
+    /**
+     * One ticket as a card: its reference, title, status, and -- where the list
+     * is not already inside an epic -- the epic it belongs to.
+     * @param props - the ticket, the opener, and whether to name its epic.
+     * @returns the card element.
+     */
+    function TicketCard({ t, ticket, makeOpener, showEpic }) {
+      return h(Card, {
+        id: ticket.ref,
+        title: ticket.title,
+        storyTag: {
+          // A ticket with no plan has no state at all; saying "unknown" beside
+          // tickets that do declare one would blur the two cases together.
+          label: ticket.status === null ? t('noPlan') : statusLabel(t, ticket.status),
+          tone: statusTone(ticket.status),
+          title: t('ticketStatus'),
+        },
+        note: showEpic === true ? ticket.epicTitle : '',
+        onOpen: makeOpener(ticket.plan === null ? null : ticket.plan.path),
+        openLabel: t('openPlan'),
+      });
+    }
+
+    /**
+     * View 1: the initiative's status lanes, then what the detectors say is
+     * wrong or unknowable.
+     *
+     * The findings stay below the work rather than inside it: a gap is not a
+     * status, and an unverifiable check is not a gap. A ticket with no plan sits
+     * in its own lane because "not started" and "cannot tell" are different
+     * claims.
+     * @param props - the initiative, the unreadable count, folds, and the opener.
+     * @returns the status view.
+     */
+    function StatusView({ t, initiative, unreadable, folded, onFlip, makeOpener }) {
+      const lanes = statusLanes(initiative).map(({ status, tickets }) => {
+        const laneKey = `status:${status ?? 'unknown'}`;
+        return h(CardLane, {
+          key: laneKey,
+          label: statusLabel(t, status),
+          token: statusToken(status),
+          cards: tickets.map((ticket) =>
+            h(TicketCard, { key: ticket.ref, t, ticket, makeOpener, showEpic: true })),
+          collapsed: isFolded(folded, laneKey, false),
+          onToggle: foldHandler(onFlip, laneKey, false),
+        });
+      });
+
+      const detected = detectInitiative(initiative);
+      const empty = detectEmptyInitiative(initiative);
+      const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
+      const findings = [
+        gaps.length === 0
+          ? null
+          : h(CardLane, {
+              key: 'gaps',
+              label: t('gapsLabel'),
+              token: WARN_TOKEN,
+              cards: gapCards(t, gaps),
+              collapsed: isFolded(folded, 'gaps', false),
+              onToggle: foldHandler(onFlip, 'gaps', false),
+            }),
+        detected.unverifiable.length === 0
+          ? null
+          : h(CardLane, {
+              key: 'unverifiable',
+              label: t('unverLabel'),
+              token: IDLE_TOKEN,
+              modifier: 'bmad-sb-lane--unverifiable',
+              cards: unverifiableCards(t, detected.unverifiable),
+              collapsed: isFolded(folded, 'unverifiable', false),
+              onToggle: foldHandler(onFlip, 'unverifiable', false),
+            }),
+      ].filter(Boolean);
+
       return h(
         'div',
-        { className: 'bmad-sb-req', 'data-state': row.state },
-        h('span', { className: 'bmad-sb-reqmark', 'aria-hidden': true }, mark),
-        h('span', { className: 'bmad-sb-reqid' }, row.id),
-        h('span', { className: 'bmad-sb-reqname' }, row.name),
-        h('span', { className: 'bmad-sb-reqnote' }, row.note),
+        null,
+        lanes.length === 0 ? h('div', { className: 'bmad-sb-note' }, t('noTickets')) : lanes,
+        unreadable > 0
+          ? h(
+              'div',
+              { className: 'bmad-sb-note' },
+              t('unreadableNote', { count: unreadable }),
+            )
+          : null,
+        findings,
       );
     }
 
-    /** Guide artwork for the specs tab: loose pages, one of them marked. */
     /**
-     * The standalone-specs tab: the specs no tracking key claims.
+     * View 2: one foldable section per epic.
      *
-     * They are side-work -- refactors, style extractions, migrations -- and the
-     * sprint file is silent about them, so nothing else on the board can show
-     * them. Most are finished; the ones that are not have no story to hang on
-     * and would otherwise be invisible.
-     *
-     * @param props - the same injection the other panes receive.
-     * @returns the specs pane.
+     * The count is settled over total, and the progress tooltip carries how many
+     * tickets have no plan -- those are counted in neither half, so a bare
+     * ratio would overstate what the epic has done.
+     * @param props - the initiative, folds, and the opener.
+     * @returns the epic view.
      */
-    /**
-     * The standalone-specs view: the specs no tracking key claims.
-     *
-     * A body, like the requirements view, for the same reason.
-     *
-     * @param props - the built view, the fold set, and the click behaviour.
-     * @returns the specs body.
-     */
-    function StandaloneView({ t, standalone, folded, onFlip }) {
-      const view = standalone ?? { lanes: [], totals: {} };
-      const totals = view.totals ?? {};
-
+    function EpicView({ t, initiative, folded, onFlip, makeOpener }) {
+      if (initiative.epics.length === 0) {
+        return h('div', { className: 'bmad-sb-note' }, t('noEpics'));
+      }
       return h(
         'div',
-        { className: 'bmad-sb-scroll' },
-        h(
-          'div',
-          { className: 'bmad-sb-view' },
-          h(
-            'div',
-            { className: 'bmad-sb-summary' },
-            h('span', null, t('specDeclared', { count: totals.declared ?? 0 })),
-            h('span', { className: 'bmad-sb-summary--done' }, t('specDone', { count: totals.done ?? 0 })),
-            h('span', { className: 'bmad-sb-summary--unknown' }, t('specOpen', { count: totals.open ?? 0 })),
-          ),
-          (view.lanes ?? []).map((lane) => {
-            const collapsed = isFolded(folded, lane.code, false);
-            return h(
-              'section',
-              { className: 'bmad-sb-lane', key: lane.code, 'aria-label': lane.label },
+        null,
+        initiative.epics.map((epic) => {
+          const settled = epic.tickets.filter(
+            (ticket) => ticket.status !== null && SETTLED.has(ticket.status),
+          ).length;
+          const unknown = epic.tickets.filter((ticket) => ticket.status === null).length;
+          const foldKey = `epic:${initiative.slug}:${epic.slug}`;
+          const collapsed = isFolded(folded, foldKey, false);
+          const cards = epic.tickets.map((ticket) =>
+            h(TicketCard, {
+              key: ticket.ref,
+              t,
+              ticket,
+              makeOpener,
+              showEpic: false,
+            }));
+          return h(
+            'section',
+            { className: 'bmad-sb-epicsec', key: foldKey },
+            h(
+              'div',
+              { className: 'bmad-sb-epichead' },
               h(LaneHeader, {
-                label: `${lane.label} (${lane.rows.length})`,
-                token: lane.code === 'OPEN' ? WARN_TOKEN : '--dsw-alias-state-success-primary',
-                count: lane.rows.length,
+                label: epic.title,
+                token: statusToken(epic.status),
+                count: `${settled}/${epic.tickets.length}`,
+                countTitle: t('epicProgress', {
+                  done: settled,
+                  total: epic.tickets.length,
+                  unknown,
+                }),
                 collapsed,
-                onToggle: foldHandler(onFlip, lane.code, false),
+                onToggle: foldHandler(onFlip, foldKey, false),
               }),
               h(
-                Fold,
-                { collapsed },
-                h(
-                  'div',
-                  { className: 'bmad-sb-cards' },
-                  lane.rows.map((row) =>
-                    h(Card, {
-                      key: row.id,
-                      id: '',
-                      title: row.name,
-                      note: row.note,
-                      tag: lane.code === 'OPEN' ? t('specOpenTag') : t('specDoneTag'),
-                      tagTone: lane.code === 'OPEN' ? 'warning' : 'neutral',
-                      footer:
-                        lane.code !== 'OPEN'
-                          ? undefined
-                          : h(CopyButton, {
-                              t,
-                              label: t('specPickUp'),
-                              value:
-                                `/bmad-build -- ${row.name}\n\nSpec: ${row.file}\n${row.note}\n\n` +
-                                'No story in the sprint file claims this spec. Tell me whether ' +
-                                'to pick it up, fold it into a story, or drop it.',
-                            }),
-                    }),
-                  ),
-                ),
+                'span',
+                {
+                  className: 'bmad-sb-tag bmad-sb-tag--source',
+                  'data-tone': statusTone(epic.status),
+                },
+                statusLabel(t, epic.status),
               ),
-            );
-          }),
-        ),
+            ),
+            h(
+              Fold,
+              { collapsed },
+              cards.length === 0
+                ? h('div', { className: 'bmad-sb-note' }, t('noTickets'))
+                : h('div', { className: 'bmad-sb-cards' }, cards),
+            ),
+          );
+        }),
       );
     }
 
     /**
-     * The requirements tab: every declared requirement, grouped by class.
+     * View 3: every ticket in the initiative, grouped by status.
      *
-     * Four classes are inventoried and only functional requirements carry a
-     * coverage map. The three without one are shown as unverifiable rather than
-     * as outstanding work, because the board cannot tell those apart and
-     * guessing "not done" is the failure this board exists to catch.
-     *
-     * @param props - the same injection the board pane receives.
-     * @returns the requirements pane.
+     * The epic title rides on each card because this is the view where a ticket
+     * is read on its own rather than inside the section that contains it.
+     * @param props - the initiative, folds, and the opener.
+     * @returns the ticket view.
      */
-    /**
-     * The requirements view: every declared requirement, grouped by class.
-     *
-     * A body, not a pane: it shares the board's header, its snapshot and its
-     * fold state, so it renders inside the one tab rather than as a second one.
-     *
-     * @param props - the built view, the fold set, and the click behaviour.
-     * @returns the requirements body.
-     */
-    function RequirementsView({ t, requirementView, folded, onFlip }) {
-      const view = requirementView ?? { lanes: [], totals: {} };
-      const totals = view.totals ?? {};
-
+    function TicketsView({ t, initiative, folded, onFlip, makeOpener }) {
+      const lanes = statusLanes(initiative);
+      if (lanes.length === 0) {
+        return h('div', { className: 'bmad-sb-note' }, t('noTickets'));
+      }
       return h(
         'div',
-        { className: 'bmad-sb-scroll' },
-        h(
-          'div',
-          { className: 'bmad-sb-view' },
-          h(
-            'div',
-            { className: 'bmad-sb-summary' },
-            h('span', null, t('reqDeclared', { count: totals.declared ?? 0 })),
-            h('span', { className: 'bmad-sb-summary--done' }, t('reqDone', { count: totals.done ?? 0 })),
-            h('span', null, t('reqPartial', { count: totals.partial ?? 0 })),
-            h('span', null, t('reqTodo', { count: totals.todo ?? 0 })),
-            h('span', { className: 'bmad-sb-summary--unknown' }, t('reqUnknown', { count: totals.unknown ?? 0 })),
-          ),
-          view.lanes.map((lane) => {
-            const collapsed = isFolded(folded, lane.code, false);
-            return h(
-              'section',
-              { className: 'bmad-sb-lane', key: lane.code, 'aria-label': lane.label },
-              h(LaneHeader, {
-                label: `${lane.label} (${lane.rows.length})`,
-                token: requirementLaneToken(lane),
-                count: lane.rows.length,
-                collapsed,
-                onToggle: foldHandler(onFlip, lane.code, false),
-              }),
-              h(
-                Fold,
-                { collapsed },
-                h(
-                  'div',
-                  { className: 'bmad-sb-cards' },
-                  lane.rows.map((row) => h(RequirementRow, { key: row.id, row })),
-                ),
-              ),
-            );
-          }),
-        ),
+        null,
+        lanes.map(({ status, tickets }) => {
+          const laneKey = `tickets:${status ?? 'unknown'}`;
+          return h(CardLane, {
+            key: laneKey,
+            label: statusLabel(t, status),
+            token: statusToken(status),
+            cards: tickets.map((ticket) =>
+              h(TicketCard, { key: ticket.ref, t, ticket, makeOpener, showEpic: true })),
+            // Settled work is still shown, but a finished initiative should open on
+            // what is left rather than on the lane that holds everything else.
+            collapsed: isFolded(folded, laneKey, SETTLED.has(status)),
+            onToggle: foldHandler(onFlip, laneKey, SETTLED.has(status)),
+          });
+        }),
       );
     }
 
     /**
-     * The board body: locates the tracking file in the workspace, then renders
-     * the board it describes.
+     * View 4: one card per initiative, with the one BMAD itself considers active
+     * marked apart from the one this tab happens to show.
+     *
+     * Choosing a card only changes local state. `active_initiative` belongs to
+     * the project's config, and a read-only board must not rewrite it to record
+     * which card someone clicked.
+     * @param props - every initiative, the active and shown slugs, and the picker.
+     * @returns the initiatives view.
+     */
+    function InitiativesView({ t, initiatives, activeSlug, selectedSlug, onSelect }) {
+      return h(
+        'div',
+        { className: 'bmad-sb-cards' },
+        initiatives.map((initiative) => {
+          const active = initiative.slug === activeSlug;
+          const selected = selectedSlug !== null && initiative.slug === selectedSlug;
+          const marks = [
+            active ? t('activeBadge') : '',
+            selected ? t('selectedBadge') : '',
+          ].filter(Boolean);
+          const counts = t('initiativeCounts', {
+            epics: initiative.counts.epics,
+            tickets: initiative.counts.tickets,
+          });
+          return h(Card, {
+            key: initiative.slug,
+            id: initiative.slug,
+            title: initiative.title,
+            storyTag: {
+              label: statusLabel(t, initiative.status),
+              tone: statusTone(initiative.status),
+              title: t('initiativeStatus'),
+            },
+            note:
+              initiative.unreadable > 0
+                ? `${counts} -- ${t('initiativeUnreadable', { count: initiative.unreadable })}`
+                : counts,
+            footer: marks.length === 0 ? undefined : marks.join(' | '),
+            onOpen: () => onSelect(initiative.slug),
+            openLabel: t('selectInitiative'),
+          });
+        }),
+      );
+    }
+
+    /**
+     * The board body: scans the BMAD project, then renders the chosen view.
      * @param props - framework-bound tab identity, `t`, and the injected readers.
      * @returns the tab's content.
      */
@@ -4074,23 +2545,25 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       const actions = tab.tab.actions;
 
       const [revision, setRevision] = React.useState(0);
-      const [view, setView] = React.useState('status');
-      const [foldedStatus, setFoldedStatus] = React.useState(() => new Map());
-      const [foldedEpic, setFoldedEpic] = React.useState(() => new Map());
+      // Null means "not chosen yet", so the default can depend on the scan:
+      // Initiatives when no active initiative is named, Status otherwise.
+      const [view, setView] = React.useState(null);
+      const [pickedSlug, setPickedSlug] = React.useState(null);
+      const [folded, setFolded] = React.useState(() => new Map());
 
-      // One stable face for the loader, so the read effect keys on the Session
+      // One stable face for the scanner, so the read effect keys on the Session
       // rather than on a fresh object each render.
-      const readers = React.useMemo(
+      const io = React.useMemo(
         () => ({
-          readWorkspaceFile,
-          listWorkspaceDir,
+          read: readWorkspaceFile,
+          list: listWorkspaceDir,
           stat: statWorkspacePath,
         }),
         [readWorkspaceFile, listWorkspaceDir, statWorkspacePath],
       );
 
       const snapshot = useSprintSnapshot({
-        readers,
+        io,
         sessionId,
         tabSignal: tab.tab.signal,
         revision,
@@ -4103,326 +2576,232 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           header: h(TitleOnlyHeader, { t }),
           body:
             snapshot.phase === 'loading'
-              ? h(
-                  'div',
-                  { className: 'bmad-sb-note', role: 'status' },
-                  t('loading'),
-                )
-              : snapshot.phase === 'missing'
-                ? h(NoSprintFile, {
-                    t,
-                    searched: snapshot.searched,
-                    onRetry: refresh,
-                  })
-                : h(LoadFailure, {
-                    t,
-                    message: snapshot.message,
-                    onRetry: refresh,
-                  }),
+              ? h('div', { className: 'bmad-sb-note', role: 'status' }, t('loading'))
+              : h(LoadFailure, {
+                  t,
+                  message: snapshot.message,
+                  onRetry: refresh,
+                }),
         });
       }
 
-      const model = snapshot.model;
-      const { bars, next, gaps, unverifiable } = snapshot;
+      const board = snapshot.board;
+      if (board.version !== 'v7') {
+        return h(BoardShell, {
+          header: h(TitleOnlyHeader, { t }),
+          body: h(VersionNotice, {
+            t,
+            version: board.version,
+            onRetry: refresh,
+          }),
+        });
+      }
+      if (board.initiatives.length === 0) {
+        return h(BoardShell, {
+          header: h(TitleOnlyHeader, { t }),
+          body: h(VersionNotice, { t, version: 'empty', onRetry: refresh }),
+        });
+      }
+
+      const active =
+        board.initiatives.find(
+          (initiative) => initiative.slug === board.config.activeInitiative,
+        ) ?? null;
+      const picked =
+        pickedSlug === null
+          ? null
+          : board.initiatives.find((initiative) => initiative.slug === pickedSlug) ?? null;
+      // Status, Epics and Tickets need one initiative; before anything is
+      // picked they show the active one, or the first when no active is named.
+      const firstOpen = board.initiatives.find((i) => !SETTLED.has(i.status)) ?? null;
+      const selected = picked ?? active ?? firstOpen ?? board.initiatives[0];
+      const shown = view ?? (active === null ? 'initiatives' : 'status');
       const makeOpener = (path) => openHandler(actions, fileAddress, path);
+      const pick = (slug) => {
+        setPickedSlug(slug);
+        setView('status');
+      };
+      const unreadable = board.unreadable.length + (selected.unreadable ?? 0);
 
-      const gapLanes = [
-        gaps.length === 0
-          ? null
-          : h(CardLane, {
-              key: 'gaps',
-              label: t('gapsLabel'),
-              token: WARN_TOKEN,
-              cards: gapCards(t, gaps),
-              collapsed: isFolded(foldedStatus, 'gaps', false),
-              onToggle: foldHandler(setFoldedStatus, 'gaps', false),
-            }),
-        unverifiable.length === 0
-          ? null
-          : h(CardLane, {
-              key: 'unverifiable',
-              label: t('unverLabel'),
-              token: IDLE_TOKEN,
-              modifier: 'bmad-sb-lane--unverifiable',
-              cards: unverifiableCards(t, unverifiable),
-              collapsed: isFolded(foldedStatus, 'unverifiable', false),
-              onToggle: foldHandler(setFoldedStatus, 'unverifiable', false),
-            }),
-      ].filter(Boolean);
-      // No wrapper: these are lanes, and they belong beside the status lanes
-      // rather than nested one level inside a section of their own.
-      const gapSection = gapLanes;
-      const lanes =
-        view === 'status'
-          ? h(StatusLanes, {
+      const body =
+        shown === 'initiatives'
+          ? h(InitiativesView, {
               t,
-              model,
-              folded: foldedStatus,
-              onFlip: setFoldedStatus,
-              makeOpener,
-              insertAfter: 'done',
-              insert: gapSection,
+              initiatives: board.initiatives,
+              activeSlug: board.config.activeInitiative,
+              selectedSlug: picked === null ? null : picked.slug,
+              onSelect: pick,
             })
-          : [
-              h(EpicSections, {
+          : shown === 'epic'
+            ? h(EpicView, {
                 t,
-                model,
-                folded: foldedEpic,
-                onFlip: setFoldedEpic,
+                initiative: selected,
+                folded,
+                onFlip: setFolded,
                 makeOpener,
-              }),
-              gapSection,
-            ];
+              })
+            : shown === 'tickets'
+              ? h(TicketsView, {
+                  t,
+                  initiative: selected,
+                  folded,
+                  onFlip: setFolded,
+                  makeOpener,
+                })
+              : h(StatusView, {
+                  t,
+                  initiative: selected,
+                  unreadable,
+                  folded,
+                  onFlip: setFolded,
+                  makeOpener,
+                });
 
-
-      // The two bars sit side by side and are never a toggle: 12 of 15 stories
-      // against 11 of 17 requirements is a pair of numbers that disagree, and
-      // the distance between them is the finding.
       return h(BoardShell, {
         header: h(BoardHeader, {
           t,
-          model,
-          bars,
-          next,
-          view,
+          initiative: selected,
+          view: shown,
           onView: setView,
           onRefresh: refresh,
           refreshing: snapshot.refreshing === true,
         }),
-        body:
-          view === 'requirements'
-            ? h(RequirementsView, {
-                t,
-                requirementView: snapshot.requirementView,
-                folded: foldedStatus,
-                onFlip: setFoldedStatus,
-              })
-            : view === 'specs'
-              ? h(StandaloneView, {
-                  t,
-                  standalone: snapshot.standalone,
-                  folded: foldedStatus,
-                  onFlip: setFoldedStatus,
-                })
-              : h(
+        body: h(
           'div',
           { className: 'bmad-sb-scroll' },
-          // Keyed on the view: switching remounts the list, which replays the
-          // settle animation instead of swapping content abruptly.
-          h('div', { className: 'bmad-sb-view', key: view }, lanes),
-          h(ActionLane, {
-            t,
-            model,
-            makeOpener,
-            collapsed: isFolded(foldedStatus, 'actions', false),
-            onToggle: foldHandler(setFoldedStatus, 'actions', false),
-          }),
-          h(DeferredLane, {
-            t,
-            model,
-            // Null when the workspace keeps no ledger; the card then has
-            // nothing to open and renders static rather than dead.
-            ledgerPath: snapshot.deferredPath,
-            makeOpener,
-            collapsed: isFolded(foldedStatus, 'deferred', false),
-            onToggle: foldHandler(setFoldedStatus, 'deferred', false),
-          }),
-                ),
+          // Keyed on the reading: switching view or initiative remounts the
+          // list, which replays the settle animation instead of swapping content.
+          h('div', { className: 'bmad-sb-view', key: `${shown}:${selected.slug}` }, body),
+        ),
       });
     }
 
     // --- Dictionaries ------------------------------------------------------
 
     const en = {
-      refreshing: 'refreshing\u2026',
-      viewRequirements: 'Requirements',
-      viewSpecs: 'Specs',
-      askAgentPill: 'Ask agent \u00b7 prompt',
-      specTitle: 'Standalone specs',
-      'specGuide.title': 'Standalone specs',
-      'specGuide.description': 'Specs no story in the sprint file claims',
-      specDeclared: '{count} specs',
-      specDone: '{count} finished',
-      specOpen: '{count} still open',
-      specOpenTag: 'not in the sprint file',
-      specDoneTag: 'unclaimed',
-      specPickUp: 'Ask an agent to pick it up',
-      unmappedNote: '{count} of {declared} unmapped',
-      actionsCount: '{open} open, {done} completed',
-      specTitle: 'Standalone specs',
-      'specGuide.title': 'Standalone specs',
-      'specGuide.description': 'Specs no story in the sprint file claims',
-      specDeclared: '{count} specs',
-      specDone: '{count} finished',
-      specOpen: '{count} still open',
-      specOpenTag: 'not in the sprint file',
-      specDoneTag: 'unclaimed',
-      specPickUp: 'Ask an agent to pick it up',
-      deferredAction: 'Ask whether to pick it up',
-      takeActionItem: 'Ask an agent to take it',
-      finishActionItem: 'Ask an agent to finish it',
-      reqTitle: 'Requirements',
-      'reqGuide.title': 'Requirements',
-      'reqGuide.description':
-        'Every declared requirement, by class, with what the evidence supports',
-      reqDeclared: '{count} declared',
-      reqDone: '{count} done',
-      reqPartial: '{count} partial',
-      reqTodo: '{count} not started',
-      reqUnknown: '{count} no evidence',
-      unmappedNote: '{count} of {declared} unmapped',
-      gapsLabel: 'Gaps',
-      unverLabel: 'Could not check',
-      copied: 'Copied',
-      copyFailed: 'Copy failed -- select and copy manually',
-      barNoData: '{label}: no data',
-      cannotMeasure: 'cannot measure',
-      barStories: 'stories',
-      barRequirements: 'requirements',
-      barLabel: '{label}: {done} of {total} complete',
-      barLabelUnknown: '{label}: {done} of {total} complete, {unknown} could not be verified',
-      unknownHint: '{count} could not be verified',
-      nothingVerifiable: 'nothing verifiable',
-      nextLabel: 'Next',
-      allDone: 'Every story is done.',
-      gapsTitle: 'Gaps ({count})',
-      unverTitle: 'Could not check ({count})',
-      askAnAgent: 'Ask an agent',
-      title: 'BMAD Sprint board',
+      'refreshing': 'refreshing...',
+      'viewLabel': 'Group the board by',
+      'viewStatus': 'Status',
+      'viewEpic': 'Epics',
+      'viewTickets': 'Tickets',
+      'viewInitiatives': 'Initiatives',
+      'title': 'BMAD v7 board',
       'guide.title': 'Sprint board',
-      'guide.description': 'BMAD sprint status as a board',
-      refresh: 'Re-read the sprint files',
-      retry: 'Retry',
-      loading: 'Reading the sprint status\u2026',
-      loadFailed: 'Could not read the sprint files.',
-      'noSprint.title': 'No sprint tracking file in this workspace',
-      'noSprint.body':
-        'The board looks for {names} anywhere in the Session workspace, checking the usual BMAD locations first.',
-      'noSprint.searched':
-        'Nothing matched {candidates} conventional locations, nor a scan {depth} directories deep.',
-      'noSprint.retry': 'Search again',
-      updated: 'Updated',
-      viewLabel: 'Group the board by',
-      viewStatus: 'Status',
-      viewEpic: 'Epic',
-      epicLabel: 'Epic',
-      retroLabel: 'Retro',
-      openSpec: 'Open the spec file',
-      openRetro: 'Open the retrospective',
-      noSpec: 'No spec file yet',
-      'status.backlog': 'Backlog',
-      'status.ready-for-dev': 'Ready for dev',
+      'guide.description': 'BMAD v7 initiatives, epics and tickets as a board',
+      'refresh': 'Re-read the BMAD files',
+      'retry': 'Retry',
+      'loading': 'Reading the BMAD project...',
+      'loadFailed': 'Could not read the BMAD project.',
+      'v6.title': 'This board reads BMAD v7',
+      'v6.body': 'This workspace looks like a BMAD v6 project. This version does not read it -- install dsh-plugin-bmad-sprint-board@1.0.0 for the v6 board.',
+      'noBmad.title': 'No BMAD project in this workspace',
+      'noBmad.body': 'The board looks for _bmad/config.toml and the output folder it declares.',
+      'noInitiatives.title': 'No initiatives found',
+      'noInitiatives.body': 'The configured output folder holds no initiative-* folder yet.',
+      'noTickets': 'No tickets in this view.',
+      'noEpics': 'This initiative declares no epics.',
+      'unreadableNote': '{count} file(s) could not be read; the board may be incomplete.',
+      'status.blocked': 'Blocked',
       'status.in-progress': 'In progress',
       'status.review': 'In review',
+      'status.built': 'Built',
+      'status.draft': 'Draft',
       'status.done': 'Done',
-      'status.optional': 'Optional',
-      'status.open': 'Open',
-      actionsTitle: 'Retro action items',
-      actionsDone: '{count} completed',
-      noOpenActions: 'No open action items.',
-      deferredTitle: 'Deferred work',
-      noDeferred: 'No deferred work recorded.',
-      deferredCount: '{count} deferred',
-      deferredFrom: 'Deferred from story {id}',
-      'shortcut.noSession': 'Open a Session to show the sprint board',
+      'status.dropped': 'Dropped',
+      'status.unknown': 'Unknown',
+      'noPlan': 'No plan',
+      'ticketStatus': 'Ticket status',
+      'openPlan': 'Open the plan file',
+      'epicProgress': '{done} of {total} tickets settled, {unknown} with no plan',
+      'initiativeStatus': 'Initiative status',
+      'initiativeCounts': '{epics} epics, {tickets} tickets',
+      'initiativeUnreadable': '{count} unreadable file(s)',
+      'activeBadge': 'active initiative',
+      'selectedBadge': 'shown here',
+      'selectInitiative': 'Show this initiative on the board',
+      'settledInitiatives': 'settled initiatives',
+      'gapsLabel': 'Gaps',
+      'unverLabel': 'Could not check',
+      'askAnAgent': 'Ask an agent',
+      'askAgentPill': 'Ask agent - prompt',
+      'copied': 'Copied',
+      'copyFailed': 'Copy failed -- select and copy manually',
+      'barNoData': '{label}: no data',
+      'cannotMeasure': 'cannot measure',
+      'barTickets': 'tickets',
+      'barLabel': '{label}: {done} of {total} complete',
+      'barLabelUnknown': '{label}: {done} of {total} complete, {unknown} could not be verified',
+      'unknownHint': '{count} could not be verified',
+      'nothingVerifiable': 'nothing verifiable',
+      'nextLabel': 'Next',
+      'allDone': 'Every ticket is done.',
+      'noSpec': 'No plan file yet',
+      'openSpec': 'Open the spec file',
+      'deferredCount': '{count} deferred',
+      'shortcut.noSession': 'Open a Session to show the BMAD board',
     };
 
     const zh = {
-      refreshing: '\u6B63\u5728\u5237\u65B0\u2026',
-      viewRequirements: '\u9700\u6C42',
-      viewSpecs: '\u89C4\u683C',
-      askAgentPill: '\u8BE2\u95EE\u667A\u80FD\u4F53 \u00B7 \u63D0\u793A\u8BCD',
-      specTitle: '\u72EC\u7ACB\u89C4\u683C',
-      'specGuide.title': '\u72EC\u7ACB\u89C4\u683C',
-      'specGuide.description': '\u51B2\u523A\u6587\u4EF6\u4E2D\u6CA1\u6709\u4EFB\u4F55\u6545\u4E8B\u58F0\u660E\u7684\u89C4\u683C',
-      specDeclared: '\u5171 {count} \u4EFD',
-      specDone: '{count} \u5DF2\u5B8C\u6210',
-      specOpen: '{count} \u4ECD\u672A\u5B8C\u6210',
-      specOpenTag: '\u4E0D\u5728\u51B2\u523A\u6587\u4EF6\u4E2D',
-      specDoneTag: '\u65E0\u4EBA\u8BA4\u9886',
-      specPickUp: '\u8BA9\u667A\u80FD\u4F53\u63A5\u624B',
-      unmappedNote: '{declared} \u9879\u4E2D {count} \u9879\u672A\u6620\u5C04',
-      actionsCount: '{open} \u9879\u5F85\u529E\uFF0C{done} \u9879\u5DF2\u5B8C\u6210',
-      specTitle: '\u72EC\u7ACB\u89C4\u683C',
-      'specGuide.title': '\u72EC\u7ACB\u89C4\u683C',
-      'specGuide.description': '\u51B2\u523A\u6587\u4EF6\u4E2D\u6CA1\u6709\u4EFB\u4F55\u6545\u4E8B\u58F0\u660E\u7684\u89C4\u683C',
-      specDeclared: '\u5171 {count} \u4EFD',
-      specDone: '{count} \u5DF2\u5B8C\u6210',
-      specOpen: '{count} \u4ECD\u672A\u5B8C\u6210',
-      specOpenTag: '\u4E0D\u5728\u51B2\u523A\u6587\u4EF6\u4E2D',
-      specDoneTag: '\u65E0\u4EBA\u8BA4\u9886',
-      specPickUp: '\u8BA9\u667A\u80FD\u4F53\u63A5\u624B',
-      deferredAction: '\u8BE2\u95EE\u662F\u5426\u63A5\u624B',
-      takeActionItem: '\u8BA9\u667A\u80FD\u4F53\u63A5\u624B',
-      finishActionItem: '\u8BA9\u667A\u80FD\u4F53\u5B8C\u6210',
-      reqTitle: '\u9700\u6C42',
-      'reqGuide.title': '\u9700\u6C42',
-      'reqGuide.description':
-        '\u6309\u7C7B\u522B\u5217\u51FA\u6BCF\u4E00\u9879\u58F0\u660E\u7684\u9700\u6C42\uFF0C\u4EE5\u53CA\u8BC1\u636E\u652F\u6301\u7684\u72B6\u6001',
-      reqDeclared: '\u5171 {count} \u9879',
-      reqDone: '{count} \u5DF2\u5B8C\u6210',
-      reqPartial: '{count} \u90E8\u5206',
-      reqTodo: '{count} \u672A\u5F00\u59CB',
-      reqUnknown: '{count} \u65E0\u8BC1\u636E',
-      unmappedNote: '{declared} \u9879\u4E2D {count} \u9879\u672A\u6620\u5C04',
-      gapsLabel: '\u95EE\u9898',
-      unverLabel: '\u65E0\u6CD5\u6838\u5B9E',
-      copied: '\u5DF2\u590D\u5236',
-      copyFailed: '\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u5E76\u590D\u5236',
-      barNoData: '{label}\uff1a\u65e0\u6570\u636e',
-      cannotMeasure: '\u65e0\u6cd5\u6d4b\u91cf',
-      barStories: '\u6545\u4e8b',
-      barRequirements: '\u9700\u6c42',
-      barLabel: '{label}\uff1a{total} \u9879\u4e2d\u5b8c\u6210 {done} \u9879',
-      barLabelUnknown:
-        '{label}\uff1a{total} \u9879\u4e2d\u5b8c\u6210 {done} \u9879\uff0c{unknown} \u9879\u65e0\u6cd5\u6838\u5b9e',
-      unknownHint: '{count} \u9879\u65e0\u6cd5\u6838\u5b9e',
-      nothingVerifiable: '\u65e0\u53ef\u6838\u5b9e\u9879',
-      nextLabel: '\u4e0b\u4e00\u6b65',
-      allDone: '\u6240\u6709\u6545\u4e8b\u5df2\u5b8c\u6210\u3002',
-      gapsTitle: '\u95ee\u9898\uff08{count}\uff09',
-      unverTitle: '\u65e0\u6cd5\u6838\u5b9e\uff08{count}\uff09',
-      askAnAgent: '\u8be2\u95ee\u667e\u80fd\u4f53',
-      title: 'BMAD \u51B2\u523A\u770B\u677F',
-      'guide.title': '\u51B2\u523A\u770B\u677F',
-      'guide.description':
-        '\u4EE5\u770B\u677F\u5F62\u5F0F\u5C55\u793A BMAD \u51B2\u523A\u72B6\u6001',
-      refresh: '\u91CD\u65B0\u8BFB\u53D6\u51B2\u523A\u6587\u4EF6',
-      retry: '\u91CD\u8BD5',
-      loading: '\u6B63\u5728\u8BFB\u53D6\u51B2\u523A\u72B6\u6001\u2026',
-      loadFailed: '\u65E0\u6CD5\u8BFB\u53D6\u51B2\u523A\u6587\u4EF6\u3002',
-      'noSprint.title':
-        '\u6B64\u5DE5\u4F5C\u533A\u4E2D\u6CA1\u6709\u51B2\u523A\u8DDF\u8E2A\u6587\u4EF6',
-      'noSprint.body':
-        '\u770B\u677F\u4F1A\u5728\u4F1A\u8BDD\u5DE5\u4F5C\u533A\u4E2D\u641C\u7D22 {names}\uFF0C\u5E76\u4F18\u5148\u68C0\u67E5\u5E38\u89C1\u7684 BMAD \u4F4D\u7F6E\u3002',
-      'noSprint.searched':
-        '\u5DF2\u68C0\u67E5 {candidates} \u4E2A\u5E38\u89C1\u4F4D\u7F6E\uFF0C\u5E76\u626B\u63CF\u5230 {depth} \u5C42\u6DF1\u5EA6\uFF0C\u5747\u672A\u547D\u4E2D\u3002',
-      'noSprint.retry': '\u91CD\u65B0\u641C\u7D22',
-      updated: '\u66F4\u65B0\u4E8E',
-      viewLabel: '\u5206\u7EC4\u65B9\u5F0F',
-      viewStatus: '\u72B6\u6001',
-      viewEpic: '\u8BBE\u5B9A\u96C6',
-      epicLabel: '\u8BBE\u5B9A\u96C6',
-      retroLabel: '\u56DE\u987E',
-      openSpec: '\u6253\u5F00\u89C4\u683C\u6587\u4EF6',
-      openRetro: '\u6253\u5F00\u56DE\u987E\u6587\u4EF6',
-      noSpec: '\u5C1A\u65E0\u89C4\u683C\u6587\u4EF6',
-      'status.backlog': '\u5F85\u529E',
-      'status.ready-for-dev': '\u53EF\u5F00\u53D1',
-      'status.in-progress': '\u8FDB\u884C\u4E2D',
-      'status.review': '\u5BA1\u67E5\u4E2D',
-      'status.done': '\u5DF2\u5B8C\u6210',
-      'status.optional': '\u53EF\u9009',
-      'status.open': '\u5F85\u529E',
-      actionsTitle: '\u56DE\u987E\u884C\u52A8\u9879',
-      actionsDone: '\u5DF2\u5B8C\u6210 {count} \u9879',
-      noOpenActions: '\u6CA1\u6709\u5F85\u529E\u884C\u52A8\u9879\u3002',
-      deferredTitle: '\u5EF6\u671F\u5DE5\u4F5C',
-      noDeferred: '\u6CA1\u6709\u8BB0\u5F55\u5EF6\u671F\u5DE5\u4F5C\u3002',
-      deferredCount: '\u5EF6\u671F {count} \u9879',
-      deferredFrom: '\u6765\u81EA\u6545\u4E8B {id} \u7684\u5EF6\u671F\u9879',
-      'shortcut.noSession':
-        '\u9700\u8981\u6253\u5F00\u4E00\u4E2A\u4F1A\u8BDD\u624D\u80FD\u663E\u793A\u51B2\u523A\u770B\u677F',
+      'refreshing': '\u6b63\u5728\u5237\u65b0...',
+      'viewLabel': '\u770b\u677f\u5206\u7ec4\u65b9\u5f0f',
+      'viewStatus': '\u72b6\u6001',
+      'viewEpic': '\u53f2\u8bd7',
+      'viewTickets': '\u5de5\u5355',
+      'viewInitiatives': '\u5021\u8bae',
+      'title': 'BMAD v7 \u770b\u677f',
+      'guide.title': '\u51b2\u523a\u770b\u677f',
+      'guide.description': '\u4ee5\u770b\u677f\u5f62\u5f0f\u5c55\u793a BMAD v7 \u7684\u5021\u8bae\u3001\u53f2\u8bd7\u4e0e\u5de5\u5355',
+      'refresh': '\u91cd\u65b0\u8bfb\u53d6 BMAD \u6587\u4ef6',
+      'retry': '\u91cd\u8bd5',
+      'loading': '\u6b63\u5728\u8bfb\u53d6 BMAD \u9879\u76ee...',
+      'loadFailed': '\u65e0\u6cd5\u8bfb\u53d6 BMAD \u9879\u76ee\u3002',
+      'v6.title': '\u6b64\u770b\u677f\u4ec5\u652f\u6301 BMAD v7',
+      'v6.body': '\u6b64\u5de5\u4f5c\u533a\u770b\u8d77\u6765\u662f BMAD v6 \u9879\u76ee\uff0c\u672c\u7248\u672c\u65e0\u6cd5\u8bfb\u53d6\u3002\u8bf7\u5b89\u88c5 dsh-plugin-bmad-sprint-board@1.0.0 \u4ee5\u4f7f\u7528 v6 \u770b\u677f\u3002',
+      'noBmad.title': '\u6b64\u5de5\u4f5c\u533a\u4e2d\u6ca1\u6709 BMAD \u9879\u76ee',
+      'noBmad.body': '\u770b\u677f\u4f1a\u67e5\u627e _bmad/config.toml \u53ca\u5176\u58f0\u660e\u7684\u8f93\u51fa\u76ee\u5f55\u3002',
+      'noInitiatives.title': '\u672a\u627e\u5230\u4efb\u4f55\u5021\u8bae',
+      'noInitiatives.body': '\u914d\u7f6e\u7684\u8f93\u51fa\u76ee\u5f55\u4e2d\u5c1a\u65e0 initiative-* \u76ee\u5f55\u3002',
+      'noTickets': '\u6b64\u89c6\u56fe\u4e2d\u6ca1\u6709\u5de5\u5355\u3002',
+      'noEpics': '\u6b64\u5021\u8bae\u5c1a\u672a\u58f0\u660e\u4efb\u4f55\u53f2\u8bd7\u3002',
+      'unreadableNote': '\u6709 {count} \u4e2a\u6587\u4ef6\u65e0\u6cd5\u8bfb\u53d6\uff0c\u770b\u677f\u53ef\u80fd\u4e0d\u5b8c\u6574\u3002',
+      'status.blocked': '\u53d7\u963b',
+      'status.in-progress': '\u8fdb\u884c\u4e2d',
+      'status.review': '\u5ba1\u67e5\u4e2d',
+      'status.built': '\u5df2\u6784\u5efa',
+      'status.draft': '\u8349\u7a3f',
+      'status.done': '\u5df2\u5b8c\u6210',
+      'status.dropped': '\u5df2\u653e\u5f03',
+      'status.unknown': '\u672a\u77e5',
+      'noPlan': '\u65e0\u8ba1\u5212',
+      'ticketStatus': '\u5de5\u5355\u72b6\u6001',
+      'openPlan': '\u6253\u5f00\u8ba1\u5212\u6587\u4ef6',
+      'epicProgress': '{total} \u4e2a\u5de5\u5355\u4e2d {done} \u4e2a\u5df2\u7ed3\u6e05\uff0c{unknown} \u4e2a\u6ca1\u6709\u8ba1\u5212',
+      'initiativeStatus': '\u5021\u8bae\u72b6\u6001',
+      'initiativeCounts': '{epics} \u4e2a\u53f2\u8bd7\uff0c{tickets} \u4e2a\u5de5\u5355',
+      'initiativeUnreadable': '{count} \u4e2a\u6587\u4ef6\u65e0\u6cd5\u8bfb\u53d6',
+      'activeBadge': '\u5f53\u524d\u6d3b\u8dc3\u5021\u8bae',
+      'selectedBadge': '\u5f53\u524d\u663e\u793a',
+      'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
+      'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'gapsLabel': '\u5dee\u8ddd',
+      'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
+      'askAnAgent': '\u8be2\u95ee\u667a\u80fd\u4f53',
+      'askAgentPill': '\u8be2\u95ee\u667a\u80fd\u4f53 - \u63d0\u793a\u8bcd',
+      'copied': '\u5df2\u590d\u5236',
+      'copyFailed': '\u590d\u5236\u5931\u8d25 -- \u8bf7\u624b\u52a8\u9009\u62e9\u5e76\u590d\u5236',
+      'barNoData': '{label}\uff1a\u65e0\u6570\u636e',
+      'cannotMeasure': '\u65e0\u6cd5\u6d4b\u91cf',
+      'barTickets': '\u5de5\u5355',
+      'barLabel': '{label}\uff1a{total} \u4e2d\u7684 {done} \u5df2\u5b8c\u6210',
+      'barLabelUnknown': '{label}\uff1a{total} \u4e2d\u7684 {done} \u5df2\u5b8c\u6210\uff0c{unknown} \u9879\u65e0\u6cd5\u6838\u5b9e',
+      'unknownHint': '{count} \u9879\u65e0\u6cd5\u6838\u5b9e',
+      'nothingVerifiable': '\u65e0\u53ef\u6838\u5b9e\u9879',
+      'nextLabel': '\u4e0b\u4e00\u6b65',
+      'allDone': '\u6240\u6709\u5de5\u5355\u5747\u5df2\u5b8c\u6210\u3002',
+      'noSpec': '\u5c1a\u65e0\u8ba1\u5212\u6587\u4ef6',
+      'openSpec': '\u6253\u5f00\u89c4\u683c\u6587\u4ef6',
+      'deferredCount': '\u5ef6\u671f {count} \u9879',
+      'shortcut.noSession': '\u9700\u8981\u6253\u5f00\u4e00\u4e2a\u4f1a\u8bdd\u624d\u80fd\u663e\u793a BMAD \u770b\u677f',
     };
 
     return {
@@ -4520,43 +2899,38 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           'bmad-sprint-board: tab type',
         );
 
-        // Both tabs read the same artefacts through the same readers, so the
-        // injection is built once and registered under each tab's own key.
+        // The tab body reads through these bindings rather than the Remote face
+        // directly, so the scanner never has to know about Sessions or remote
+        // result envelopes and the same readers work for any workspace face.
         const paneInject = (sessionId) => ({
           sessionId,
+          readWorkspaceFile: (path, signal) =>
+            readWholeFile(ctx.remote.workspaceFiles, sessionId, path, signal),
+          listWorkspaceDir: async (path, signal) => {
+            const result = await ctx.remote.workspaceFiles.list(
+              sessionId,
+              path,
+              signal,
+            );
+            if (!result.ok) throw result.error;
+            return result.value.entries;
+          },
+          // Existence probes during the scan: a missing path is an answer, not a
+          // failure, so this reports the miss instead of throwing.
+          statWorkspacePath: async (path, signal) => {
+            try {
+              const result = await ctx.remote.workspaceFiles.stat(
                 sessionId,
-                readWorkspaceFile: (path, signal) =>
-                  readWholeFile(
-                    ctx.remote.workspaceFiles,
-                    sessionId,
-                    path,
-                    signal,
-                  ),
-                listWorkspaceDir: async (path, signal) => {
-                  const result = await ctx.remote.workspaceFiles.list(
-                    sessionId,
-                    path,
-                    signal,
-                  );
-                  if (!result.ok) throw result.error;
-                  return result.value.entries;
-                },
-                // Existence probes during the scan: a missing path is an answer,
-                // not a failure, so this reports the miss instead of throwing.
-                statWorkspacePath: async (path, signal) => {
-                  try {
-                    const result = await ctx.remote.workspaceFiles.stat(
-                      sessionId,
-                      path,
-                      signal,
-                    );
-                    return result.ok
-                      ? { ok: true }
-                      : { ok: false, code: result.error.code };
-                  } catch (error) {
-                    return { ok: false, code: String(error) };
-                  }
-                },
+                path,
+                signal,
+              );
+              return result.ok
+                ? { ok: true }
+                : { ok: false, code: result.error.code };
+            } catch (error) {
+              return { ok: false, code: String(error) };
+            }
+          },
           fileAddress: (path) => sessionFileAddress(sessionId, path),
         });
 

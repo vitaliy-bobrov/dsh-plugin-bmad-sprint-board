@@ -1,8 +1,8 @@
 {
     "name": "dsh-plugin-bmad-sprint-board",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "type": "module",
-    "description": "Read a BMAD project in the Session sidebar: sprint board, requirements, and standalone specs",
+    "description": "Read a BMAD v7 project in the Session sidebar: initiatives, epics, tickets and the gaps between them",
     "icon": "./icon.svg",
     "exports": {
         ".": "./index.js",
@@ -33,6 +33,9 @@
             "inject": [
                 "@deepseek-ai/dsh-client-ui-sidebar-right"
             ]
+        },
+        "bmad": {
+            "version": "v7"
         }
     },
     "license": "MIT",
@@ -47,7 +50,9 @@
         "dsh",
         "dsh-plugin",
         "bmad",
-        "sprint",
+        "bmad-v7",
+        "initiative",
+        "tickets",
         "board"
     ]
 }
