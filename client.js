@@ -2650,6 +2650,8 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
               activeSlug: board.config.activeInitiative,
               selectedSlug: picked === null ? null : picked.slug,
               onSelect: pick,
+            folded,
+            onFlip: setFolded,
             })
           : shown === 'epic'
             ? h(EpicView, {
