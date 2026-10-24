@@ -919,7 +919,11 @@ window.__ModuleLoader__.load({
           slug: epic.slug,
           folder: epic.folder,
           title: header.title ?? epic.title ?? epic.slug,
-          status: header.status,
+          // A container's status is absent until its first ticket starts, which is a
+          // statement about the work rather than a gap in the file: it has not
+          // started. Rendering that as "unknown" says the opposite.
+          status: stateOf(header.status ?? ''),
+          rawStatus: header.status,
           tickets,
           orphans,
           ignored,
@@ -942,7 +946,8 @@ window.__ModuleLoader__.load({
         slug,
         dir,
         title: own.title ?? humanise(slug),
-        status: own.status,
+        status: stateOf(own.status ?? ''),
+        rawStatus: own.status,
         epics: built,
         counts: {
           epics: built.length,
@@ -2871,6 +2876,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'noEpics': 'This initiative declares no epics.',
       'unreadableNote': '{count} file(s) could not be read; the board may be incomplete.',
       'status.blocked': 'Blocked',
+      'status.backlog': 'Not started',
       'status.in-progress': 'In progress',
       'status.review': 'In review',
       'status.built': 'Built',
@@ -2935,6 +2941,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'noEpics': '\u6b64\u5021\u8bae\u5c1a\u672a\u58f0\u660e\u4efb\u4f55\u53f2\u8bd7\u3002',
       'unreadableNote': '\u6709 {count} \u4e2a\u6587\u4ef6\u65e0\u6cd5\u8bfb\u53d6\uff0c\u770b\u677f\u53ef\u80fd\u4e0d\u5b8c\u6574\u3002',
       'status.blocked': '\u53d7\u963b',
+      'status.backlog': '\u5c1a\u672a\u5f00\u59cb',
       'status.in-progress': '\u8fdb\u884c\u4e2d',
       'status.review': '\u5ba1\u67e5\u4e2d',
       'status.built': '\u5df2\u6784\u5efa',

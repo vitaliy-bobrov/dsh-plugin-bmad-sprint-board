@@ -216,7 +216,11 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
       slug: epic.slug,
       folder: epic.folder,
       title: header.title ?? epic.title ?? epic.slug,
-      status: header.status,
+      // A container's status is absent until its first ticket starts, which is a
+      // statement about the work rather than a gap in the file: it has not
+      // started. Rendering that as "unknown" says the opposite.
+      status: stateOf(header.status ?? ''),
+      rawStatus: header.status,
       tickets,
       orphans,
       ignored,
@@ -239,7 +243,8 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
     slug,
     dir,
     title: own.title ?? humanise(slug),
-    status: own.status,
+    status: stateOf(own.status ?? ''),
+    rawStatus: own.status,
     epics: built,
     counts: {
       epics: built.length,

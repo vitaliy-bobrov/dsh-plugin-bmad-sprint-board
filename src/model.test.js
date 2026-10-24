@@ -232,3 +232,38 @@ test('ticketStatus prefers the plan, then the leaf, then backlog', () => {
   // the table is the contract, so a stray key must not become a lane silently
   assert.equal(Object.keys(STATE_OF).length, 9)
 })
+
+test('a container with no status is not started, never unknown', () => {
+  // BMAD leaves a container's status absent until its first ticket starts, so
+  // the field being missing is a statement about the work, not a gap in the
+  // file. Rendering it as unknown says precisely the opposite.
+  const model = buildInitiative({
+    slug: 'x',
+    dir: 'initiatives/i-x',
+    ticket: "---\ntype: initiative\ntitle: 'X'\n---\n",
+    epics: [{
+      id: 1,
+      slug: 'epic-a',
+      title: 'Epic A',
+      folder: 'initiatives/i-x/tickets/epic-a',
+      ticket: "---\ntype: epic\ntitle: 'Epic A'\n---\n",
+      storyIndex: storyIndex(1),
+      files: [],
+    }],
+  })
+  assert.equal(model.status, 'backlog')
+  assert.equal(model.rawStatus, null)
+  assert.equal(model.epics[0].status, 'backlog')
+  assert.equal(model.epics[0].rawStatus, null)
+  // and not started is not settled, so the initiative stays in the open list
+  assert.equal(SETTLED.has(model.status), false)
+  // it must not trip the "settled with open tickets" check either
+  const { gaps } = detectInitiative(model)
+  assert.equal(gaps.filter((g) => g.id === 'C2').length, 0)
+})
+
+test('a container that does declare a status keeps the state that status means', () => {
+  const model = initiative({ status: 'done', epicStatus: 'dropped' })
+  assert.equal(model.status, 'done')
+  assert.equal(model.epics[0].status, 'dropped')
+})
