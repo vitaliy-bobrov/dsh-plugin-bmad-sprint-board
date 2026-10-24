@@ -117,3 +117,42 @@ test('every declaration a source module exports survives into the bundle', () =>
   assert.ok(declared.size > 20, `found modules to check (${declared.size} declarations)`)
 })
 
+
+test('the four views are present, in the order the header shows them', () => {
+  // The header builds its segments from this list, so the order here is the
+  // order a reader sees. A view that exists but is unreachable from the header
+  // is the same as a missing one.
+  const list = /const VIEWS = \[([^\]]*)\]/.exec(source)
+  assert.ok(list !== null, 'the view list exists')
+  const views = list[1].match(/'[a-z]+'/g).map((s) => s.slice(1, -1))
+  assert.deepEqual(views, ['status', 'epic', 'tickets', 'initiatives'])
+  for (const view of views) {
+    assert.ok(new RegExp(`function ${view[0].toUpperCase()}${view.slice(1)}View\\(`).test(source),
+      `${view} has a body`)
+  }
+})
+
+test('settled work folds away by default, and is never dropped', () => {
+  // Folding is the difference between "the board is showing me finished work as
+  // if it were current" and "the board showed me the open work first". Dropping
+  // would be the board deciding what the reader may see, so the settled lane
+  // must still be rendered -- with a count.
+  assert.ok(/isFolded\(folded, laneKey, SETTLED\.has\(status\)\)/.test(source),
+    'settled status lanes start folded')
+  assert.ok(/settledInitiatives/.test(source), 'settled initiatives get their own lane')
+  assert.ok(/count: String\(settled\.length\)/.test(source), 'and the lane carries the count')
+})
+
+test('the default selection skips settled initiatives', () => {
+  // Before this, it fell through to initiatives[0], which was whichever folder
+  // sorted first.
+  const pick = /const selected = (picked[^;]+);/.exec(source)
+  assert.ok(pick !== null, 'the selection line exists')
+  assert.ok(pick[1].includes('firstOpen'), `selection was: ${pick[1]}`)
+})
+
+test('a v6 project is told which version reads it', () => {
+  assert.ok(source.includes('dsh-plugin-bmad-sprint-board@1.0.0'),
+    'the v6 notice names the version to install')
+  assert.ok(/v7/.test(source), 'and says which version this board reads')
+})

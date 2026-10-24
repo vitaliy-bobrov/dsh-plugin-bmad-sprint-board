@@ -2491,39 +2491,58 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
      * @param props - every initiative, the active and shown slugs, and the picker.
      * @returns the initiatives view.
      */
-    function InitiativesView({ t, initiatives, activeSlug, selectedSlug, onSelect }) {
+    function InitiativesView({ t, initiatives, activeSlug, selectedSlug, onSelect, folded, onFlip }) {
+      const asCard = (initiative) => {
+        const active = initiative.slug === activeSlug;
+        const selected = selectedSlug !== null && initiative.slug === selectedSlug;
+        const marks = [
+          active ? t('activeBadge') : '',
+          selected ? t('selectedBadge') : '',
+        ].filter(Boolean);
+        const counts = t('initiativeCounts', {
+          epics: initiative.counts.epics,
+          tickets: initiative.counts.tickets,
+        });
+        return h(Card, {
+          key: initiative.slug,
+          id: initiative.slug,
+          title: initiative.title,
+          storyTag: {
+            label: statusLabel(t, initiative.status),
+            tone: statusTone(initiative.status),
+            title: t('initiativeStatus'),
+          },
+          note:
+            initiative.unreadable > 0
+              ? `${counts} -- ${t('initiativeUnreadable', { count: initiative.unreadable })}`
+              : counts,
+          footer: marks.length === 0 ? undefined : marks.join(' | '),
+          onOpen: () => onSelect(initiative.slug),
+          openLabel: t('selectInitiative'),
+        });
+      };
+
+      // A settled initiative keeps its folder and its tickets, and hiding them
+      // would be the board deciding what the reader may see. They collect under
+      // one fold instead, so the list stays about work that is still open
+      // without pretending the finished work is not there.
+      const open = initiatives.filter((i) => !SETTLED.has(i.status));
+      const settled = initiatives.filter((i) => SETTLED.has(i.status));
+
       return h(
         'div',
-        { className: 'bmad-sb-cards' },
-        initiatives.map((initiative) => {
-          const active = initiative.slug === activeSlug;
-          const selected = selectedSlug !== null && initiative.slug === selectedSlug;
-          const marks = [
-            active ? t('activeBadge') : '',
-            selected ? t('selectedBadge') : '',
-          ].filter(Boolean);
-          const counts = t('initiativeCounts', {
-            epics: initiative.counts.epics,
-            tickets: initiative.counts.tickets,
-          });
-          return h(Card, {
-            key: initiative.slug,
-            id: initiative.slug,
-            title: initiative.title,
-            storyTag: {
-              label: statusLabel(t, initiative.status),
-              tone: statusTone(initiative.status),
-              title: t('initiativeStatus'),
-            },
-            note:
-              initiative.unreadable > 0
-                ? `${counts} -- ${t('initiativeUnreadable', { count: initiative.unreadable })}`
-                : counts,
-            footer: marks.length === 0 ? undefined : marks.join(' | '),
-            onOpen: () => onSelect(initiative.slug),
-            openLabel: t('selectInitiative'),
-          });
-        }),
+        null,
+        h('div', { className: 'bmad-sb-cards' }, open.map(asCard)),
+        settled.length === 0
+          ? null
+          : h(CardLane, {
+              label: t('settledInitiatives'),
+              token: IDLE_TOKEN,
+              cards: settled.map(asCard),
+              count: String(settled.length),
+              collapsed: isFolded(folded, 'initiatives:settled', true),
+              onToggle: foldHandler(onFlip, 'initiatives:settled', true),
+            }),
       );
     }
 
