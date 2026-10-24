@@ -39,6 +39,26 @@ export const SETTLED = new Set(['done', 'dropped'])
 export const KNOWN_STATUS = new Set(STATUS_ORDER)
 
 /**
+ * Turn a BMAD slug into something a reader can scan.
+ *
+ * Folder and file names are kebab-case (`vip-reservations`), and showing that
+ * raw reads like an identifier because it is one. A ticket that declares its own
+ * title is shown by that title; this is the fallback for the ones that do not,
+ * and the secondary label under it.
+ *
+ * @param {string} slug - a folder or file slug, with or without its prefix.
+ * @returns {string} the words, each capitalised.
+ */
+export function humanise(slug) {
+  return String(slug)
+    .replace(/^(initiative|epic)-/, '')
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((word) => (/\d/.test(word) ? word : word.charAt(0).toUpperCase() + word.slice(1)))
+    .join(' ')
+}
+
+/**
  * Read an initiative ticket's own file.
  *
  * @param {string|null} text - the contents of `initiative-<slug>.md`, or null when absent.
@@ -148,7 +168,7 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
   return {
     slug,
     dir,
-    title: own.title ?? slug,
+    title: own.title ?? humanise(slug),
     status: own.status,
     epics: built,
     counts: {

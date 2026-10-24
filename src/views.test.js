@@ -328,3 +328,35 @@ test('a v6 project is refused with the version that reads it', async () => {
   const found = names(tree)
   assert.ok(found.includes('VersionNotice'), `a v6 project gets the notice, saw: ${found.join(', ')}`)
 })
+
+test('an initiative card is labelled with words, and an empty store says so', async () => {
+  const Board = loadBoard()
+  const io = face({
+    ...FILES,
+    // an initiative marked done that has never had work in it
+    '_bmad-output/initiative-vip-reservations/initiative-vip-reservations.md':
+      "---\ntype: initiative\ntitle: 'VIP Pedal Reservations'\nstatus: 'done'\n---\n",
+  })
+  const tree = await settle(Board, {
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { actions: {}, signal: new AbortController().signal } }),
+    sessionId: 'session-labels',
+    readWorkspaceFile: io.read,
+    listWorkspaceDir: io.list,
+    statWorkspacePath: io.stat,
+    fileAddress: (path) => path,
+  })
+
+  // A collapsed lane keeps its cards in props rather than in its rendered
+  // children, so both shapes count: expanded nodes carry `name`, raw elements
+  // carry `type`.
+  const cards = elements(tree).filter(
+    (element) => element.name === 'Card' || element.type?.name === 'Card',
+  )
+  const vip = cards.find((card) => card.props.title === 'VIP Pedal Reservations')
+  assert.ok(vip, `expected the VIP card, saw: ${cards.map((c) => c.props.title).join(', ')}`)
+  // The raw slug reads like an identifier, because it is one.
+  assert.equal(vip.props.id, 'Vip Reservations')
+  // And a settled initiative with no epics contradicts itself, so it says so.
+  assert.match(vip.props.note, /initiativeEmpty/)
+})

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { detectEmptyInitiative, detectInitiative } from './detect.js'
-import { buildInitiative, statusLanes, ticketStatus } from './model.js'
+import { buildInitiative, humanise, statusLanes, ticketStatus } from './model.js'
 
 /** A story index with `count` entries titled "Ticket 1" ... "Ticket n". */
 function storyIndex(count) {
@@ -166,4 +166,27 @@ test('E1 fires only for an initiative with no epics', () => {
   })
   assert.equal(detectEmptyInitiative(empty).id, 'E1')
   assert.equal(detectEmptyInitiative(initiative()), null)
+})
+
+test('humanise turns a slug into words, and leaves a token with digits alone', () => {
+  assert.equal(humanise('vip-reservations'), 'Vip Reservations')
+  assert.equal(humanise('app-shell'), 'App Shell')
+  assert.equal(humanise('account-dashboard'), 'Account Dashboard')
+  // the prefix is BMAD's, not part of the name
+  assert.equal(humanise('epic-tools-landing-navigation'), 'Tools Landing Navigation')
+  // i18n is a word, not two letters and a number
+  assert.equal(humanise('i18n'), 'i18n')
+})
+
+test('an initiative with no title falls back to its humanised slug, not the raw one', () => {
+  const model = buildInitiative({
+    slug: 'vip-reservations',
+    dir: 'initiatives/i-vip',
+    ticket: "---\ntype: initiative\nstatus: 'done'\n---\n",
+    epics: [],
+  })
+  assert.equal(model.title, 'Vip Reservations')
+  assert.equal(model.counts.epics, 0)
+  // and the empty store is what E1 exists to report
+  assert.equal(detectEmptyInitiative(model).id, 'E1')
 })

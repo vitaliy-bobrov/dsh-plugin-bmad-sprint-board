@@ -1238,17 +1238,23 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         });
         return h(Card, {
           key: initiative.slug,
-          id: initiative.slug,
+          id: humanise(initiative.slug),
           title: initiative.title,
           storyTag: {
             label: statusLabel(t, initiative.status),
             tone: statusTone(initiative.status),
             title: t('initiativeStatus'),
           },
-          note:
+          // An initiative whose store lists no epics has never had work in it,
+          // whatever its status field says. Saying so is the whole point of the
+          // board: the number and the word disagree, and the reader sees both.
+          note: [
+            counts,
+            initiative.counts.epics === 0 ? t('initiativeEmpty') : '',
             initiative.unreadable > 0
-              ? `${counts} -- ${t('initiativeUnreadable', { count: initiative.unreadable })}`
-              : counts,
+              ? t('initiativeUnreadable', { count: initiative.unreadable })
+              : '',
+          ].filter(Boolean).join(' -- '),
           footer: marks.length === 0 ? undefined : marks.join(' | '),
           onOpen: () => onSelect(initiative.slug),
           openLabel: t('selectInitiative'),
@@ -1474,6 +1480,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
+      'initiativeEmpty': 'no epics, so never started',
       'gapsLabel': 'Gaps',
       'unverLabel': 'Could not check',
       'askAnAgent': 'Ask an agent',
@@ -1537,6 +1544,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'initiativeEmpty': '\u65e0\u4efb\u52a1\u5305\uff0c\u5c1a\u672a\u5f00\u59cb',
       'gapsLabel': '\u5dee\u8ddd',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
       'askAnAgent': '\u8be2\u95ee\u667a\u80fd\u4f53',
