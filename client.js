@@ -752,6 +752,32 @@ window.__ModuleLoader__.load({
     const STATUS_ORDER = [...STATE_ORDER, 'unknown']
 
     /**
+     * The state a container is really in.
+     *
+     * A container's status is the only place BMAD records progress, and BMAD's own
+     * lifecycle leaves it absent until the first ticket starts, then `in-progress`,
+     * then `done` or `dropped`. So a container claiming to be **done** while holding
+     * no children at all describes something that cannot have happened: nothing was
+     * ever sliced, so nothing was ever finished.
+     *
+     * `dropped` is not the same claim -- abandoning an initiative before slicing it
+     * is a decision someone can make on any day -- so it is left as it is.
+     *
+     * The board shows the state the evidence supports -- not started -- and keeps the
+     * declared word beside it, because the contradiction belongs in front of the
+     * reader rather than being quietly resolved either way.
+     *
+     * @param {string|null} declared - the word the container's file carries, or null.
+     * @param {number} children - how many epics (or tickets) it holds.
+     * @returns {string} the lane.
+     */
+    function containerState(declared, children) {
+      const state = stateOf(declared ?? '')
+      if (state === 'done' && children === 0) return 'backlog'
+      return state
+    }
+
+    /**
      * Map a status word to the lane it belongs in.
      *
      * A word the store does not know becomes its own lane and a finding, rather than
@@ -922,7 +948,7 @@ window.__ModuleLoader__.load({
           // A container's status is absent until its first ticket starts, which is a
           // statement about the work rather than a gap in the file: it has not
           // started. Rendering that as "unknown" says the opposite.
-          status: stateOf(header.status ?? ''),
+          status: containerState(header.status, tickets.length),
           rawStatus: header.status,
           tickets,
           orphans,
@@ -946,7 +972,7 @@ window.__ModuleLoader__.load({
         slug,
         dir,
         title: own.title ?? humanise(slug),
-        status: stateOf(own.status ?? ''),
+        status: containerState(own.status, built.length),
         rawStatus: own.status,
         epics: built,
         counts: {
@@ -2662,9 +2688,18 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           // An initiative whose store lists no epics has never had work in it,
           // whatever its status field says. Saying so is the whole point of the
           // board: the number and the word disagree, and the reader sees both.
+          // The status shown is the one the evidence supports, which is not
+          // always the word in the file: a container claiming done with nothing
+          // inside it has not started. Both facts are on the card, because
+          // silently preferring either one hides the disagreement.
           note: [
             counts,
             initiative.counts.epics === 0 ? t('initiativeEmpty') : '',
+            initiative.rawStatus !== null
+              && initiative.rawStatus !== initiative.status
+              && SETTLED.has(initiative.rawStatus)
+              ? t('initiativeDeclared', { word: initiative.rawStatus })
+              : '',
             initiative.unreadable > 0
               ? t('initiativeUnreadable', { count: initiative.unreadable })
               : '',
@@ -2896,6 +2931,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
       'initiativeEmpty': 'no epics, so never started',
+      'initiativeDeclared': 'its file declares {word}',
       'gapsLabel': 'Gaps',
       'unverLabel': 'Could not check',
       'askAnAgent': 'Ask an agent',
@@ -2961,6 +2997,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
       'initiativeEmpty': '\u65e0\u4efb\u52a1\u5305\uff0c\u5c1a\u672a\u5f00\u59cb',
+      'initiativeDeclared': '\u5176\u6587\u4ef6\u58f0\u79f0 {word}',
       'gapsLabel': '\u5dee\u8ddd',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
       'askAnAgent': '\u8be2\u95ee\u667a\u80fd\u4f53',

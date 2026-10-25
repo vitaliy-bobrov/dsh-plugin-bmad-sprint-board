@@ -1248,9 +1248,18 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           // An initiative whose store lists no epics has never had work in it,
           // whatever its status field says. Saying so is the whole point of the
           // board: the number and the word disagree, and the reader sees both.
+          // The status shown is the one the evidence supports, which is not
+          // always the word in the file: a container claiming done with nothing
+          // inside it has not started. Both facts are on the card, because
+          // silently preferring either one hides the disagreement.
           note: [
             counts,
             initiative.counts.epics === 0 ? t('initiativeEmpty') : '',
+            initiative.rawStatus !== null
+              && initiative.rawStatus !== initiative.status
+              && SETTLED.has(initiative.rawStatus)
+              ? t('initiativeDeclared', { word: initiative.rawStatus })
+              : '',
             initiative.unreadable > 0
               ? t('initiativeUnreadable', { count: initiative.unreadable })
               : '',
@@ -1482,6 +1491,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
       'initiativeEmpty': 'no epics, so never started',
+      'initiativeDeclared': 'its file declares {word}',
       'gapsLabel': 'Gaps',
       'unverLabel': 'Could not check',
       'askAnAgent': 'Ask an agent',
@@ -1547,6 +1557,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
       'initiativeEmpty': '\u65e0\u4efb\u52a1\u5305\uff0c\u5c1a\u672a\u5f00\u59cb',
+      'initiativeDeclared': '\u5176\u6587\u4ef6\u58f0\u79f0 {word}',
       'gapsLabel': '\u5dee\u8ddd',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
       'askAnAgent': '\u8be2\u95ee\u667a\u80fd\u4f53',

@@ -116,6 +116,16 @@ const FILES = {
     "---\ntitle: 'Wire the panel'\ntype: story\nstatus: 'in-progress'\nticket: '1'\n---\n",
   '_bmad-output/initiative-finished/initiative-finished.md':
     "---\ntype: initiative\ntitle: 'Finished work'\nstatus: 'done'\n---\n",
+  // A settled initiative only counts as settled if it actually held work: one
+  // with no epics has not started, whatever its file says.
+  '_bmad-output/initiative-finished/tickets/tickets.toml':
+    '[[epic]]\nid = 1\nslug = "epic-done"\ntitle = "Epic Done"\n',
+  '_bmad-output/initiative-finished/tickets/epic-done/epic-done.md':
+    "---\ntype: epic\ntitle: 'Epic Done'\nparent: finished\nstatus: 'done'\n---\n",
+  '_bmad-output/initiative-finished/tickets/epic-done/tickets/tickets.toml':
+    '[[entry]]\nid = "1"\ntype = "story"\ntitle = "Ship it"\n',
+  '_bmad-output/initiative-finished/tickets/epic-done/tickets/story-ship-it.md':
+    "---\nid: '1'\ntype: story\ntitle: 'Ship it'\nstatus: 'done'\n---\n",
 }
 
 /** Build a workspace face over FILES, deriving directories from the paths. */

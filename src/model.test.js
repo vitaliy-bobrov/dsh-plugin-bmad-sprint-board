@@ -17,6 +17,7 @@ import {
   SETTLED,
   STATE_OF,
   buildInitiative,
+  containerState,
   humanise,
   stateOf,
   statusLanes,
@@ -266,4 +267,26 @@ test('a container that does declare a status keeps the state that status means',
   const model = initiative({ status: 'done', epicStatus: 'dropped' })
   assert.equal(model.status, 'done')
   assert.equal(model.epics[0].status, 'dropped')
+})
+
+test('a container marked done with no children has not started', () => {
+  // BMAD's lifecycle leaves a container's status absent until the first ticket
+  // starts, so nothing can be finished that was never sliced. The state shown is
+  // the one the evidence supports; the declared word is kept beside it.
+  assert.equal(containerState('done', 0), 'backlog')
+  // abandoning something before slicing it is a decision, not a claim
+  assert.equal(containerState('dropped', 0), 'dropped')
+  assert.equal(containerState('done', 3), 'done')
+  assert.equal(containerState('in-progress', 0), 'in-progress')
+
+  const empty = buildInitiative({
+    slug: 'app-shell',
+    dir: 'initiatives/i-app-shell',
+    ticket: "---\ntype: initiative\ntitle: 'App Shell'\nstatus: 'done'\n---\n",
+    epics: [],
+  })
+  assert.equal(empty.status, 'backlog')
+  assert.equal(empty.rawStatus, 'done', 'the file is not overwritten, only outvoted')
+  // and it is not settled, so it stays with the open work
+  assert.equal(SETTLED.has(empty.status), false)
 })
