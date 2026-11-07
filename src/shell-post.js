@@ -1255,11 +1255,6 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           note: [
             counts,
             initiative.counts.epics === 0 ? t('initiativeEmpty') : '',
-            initiative.rawStatus !== null
-              && initiative.rawStatus !== initiative.status
-              && SETTLED.has(initiative.rawStatus)
-              ? t('initiativeDeclared', { word: initiative.rawStatus })
-              : '',
             initiative.unreadable > 0
               ? t('initiativeUnreadable', { count: initiative.unreadable })
               : '',
@@ -1490,8 +1485,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
-      'initiativeEmpty': 'no epics, so never started',
-      'initiativeDeclared': 'its file declares {word}',
+      'initiativeEmpty': 'nothing sliced into epics yet',
       'gapsLabel': 'Gaps',
       'unverLabel': 'Could not check',
       'askAnAgent': 'Ask an agent',
@@ -1556,8 +1550,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
-      'initiativeEmpty': '\u65e0\u4efb\u52a1\u5305\uff0c\u5c1a\u672a\u5f00\u59cb',
-      'initiativeDeclared': '\u5176\u6587\u4ef6\u58f0\u79f0 {word}',
+            'initiativeEmpty': '\u5c1a\u672a\u5207\u5206\u4e3a\u4efb\u52a1\u5305',
       'gapsLabel': '\u5dee\u8ddd',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
       'askAnAgent': '\u8be2\u95ee\u667a\u80fd\u4f53',

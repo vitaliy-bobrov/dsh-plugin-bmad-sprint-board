@@ -51,27 +51,29 @@ export const STATUS_ORDER = [...STATE_ORDER, 'unknown']
 /**
  * The state a container is really in.
  *
- * A container's status is the only place BMAD records progress, and BMAD's own
- * lifecycle leaves it absent until the first ticket starts, then `in-progress`,
- * then `done` or `dropped`. So a container claiming to be **done** while holding
- * no children at all describes something that cannot have happened: nothing was
- * ever sliced, so nothing was ever finished.
+ * Two cases, and they are not the same question.
  *
- * `dropped` is not the same claim -- abandoning an initiative before slicing it
- * is a decision someone can make on any day -- so it is left as it is.
+ * **The file declares a status.** That is the record BMAD keeps, and the board
+ * reports it. It is not the board's place to decide a container marked done is
+ * wrong just because it holds nothing: an initiative finished and later stripped
+ * of its tickets looks exactly like one that never started, and only the person
+ * who did it can tell them apart.
  *
- * The board shows the state the evidence supports -- not started -- and keeps the
- * declared word beside it, because the contradiction belongs in front of the
- * reader rather than being quietly resolved either way.
+ * **The file is silent.** BMAD leaves a container's status absent until its first
+ * ticket starts, so silence is not a fact about the work -- it is the absence of
+ * one. The children are the fact: no children means nothing has started, every
+ * child settled means the container is finished, and anything between means it is
+ * in progress.
  *
- * @param {string|null} declared - the word the container's file carries, or null.
- * @param {number} children - how many epics (or tickets) it holds.
+ * @param {string|null} declared - the word the container's file carries.
+ * @param {string[]} children - the states of its epics (or tickets).
  * @returns {string} the lane.
  */
 export function containerState(declared, children) {
-  const state = stateOf(declared ?? '')
-  if (state === 'done' && children === 0) return 'backlog'
-  return state
+  if (declared !== null && declared !== '') return stateOf(declared)
+  if (children.length === 0) return 'backlog'
+  if (children.every((state) => SETTLED.has(state))) return 'done'
+  return 'in-progress'
 }
 
 /**
@@ -245,7 +247,7 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
       // A container's status is absent until its first ticket starts, which is a
       // statement about the work rather than a gap in the file: it has not
       // started. Rendering that as "unknown" says the opposite.
-      status: containerState(header.status, tickets.length),
+      status: containerState(header.status, tickets.map((ticket) => ticket.status)),
       rawStatus: header.status,
       tickets,
       orphans,
@@ -269,7 +271,7 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
     slug,
     dir,
     title: own.title ?? humanise(slug),
-    status: containerState(own.status, built.length),
+    status: containerState(own.status, built.map((epic) => epic.status)),
     rawStatus: own.status,
     epics: built,
     counts: {

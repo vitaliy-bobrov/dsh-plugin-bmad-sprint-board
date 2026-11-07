@@ -234,59 +234,66 @@ test('ticketStatus prefers the plan, then the leaf, then backlog', () => {
   assert.equal(Object.keys(STATE_OF).length, 9)
 })
 
-test('a container with no status is not started, never unknown', () => {
-  // BMAD leaves a container's status absent until its first ticket starts, so
-  // the field being missing is a statement about the work, not a gap in the
-  // file. Rendering it as unknown says precisely the opposite.
-  const model = buildInitiative({
-    slug: 'x',
-    dir: 'initiatives/i-x',
-    ticket: "---\ntype: initiative\ntitle: 'X'\n---\n",
-    epics: [{
-      id: 1,
-      slug: 'epic-a',
-      title: 'Epic A',
-      folder: 'initiatives/i-x/tickets/epic-a',
-      ticket: "---\ntype: epic\ntitle: 'Epic A'\n---\n",
-      storyIndex: storyIndex(1),
-      files: [],
-    }],
-  })
-  assert.equal(model.status, 'backlog')
-  assert.equal(model.rawStatus, null)
-  assert.equal(model.epics[0].status, 'backlog')
-  assert.equal(model.epics[0].rawStatus, null)
-  // and not started is not settled, so the initiative stays in the open list
-  assert.equal(SETTLED.has(model.status), false)
-  // it must not trip the "settled with open tickets" check either
-  const { gaps } = detectInitiative(model)
-  assert.equal(gaps.filter((g) => g.id === 'C2').length, 0)
-})
-
 test('a container that does declare a status keeps the state that status means', () => {
   const model = initiative({ status: 'done', epicStatus: 'dropped' })
   assert.equal(model.status, 'done')
   assert.equal(model.epics[0].status, 'dropped')
 })
 
-test('a container marked done with no children has not started', () => {
-  // BMAD's lifecycle leaves a container's status absent until the first ticket
-  // starts, so nothing can be finished that was never sliced. The state shown is
-  // the one the evidence supports; the declared word is kept beside it.
-  assert.equal(containerState('done', 0), 'backlog')
-  // abandoning something before slicing it is a decision, not a claim
-  assert.equal(containerState('dropped', 0), 'dropped')
-  assert.equal(containerState('done', 3), 'done')
-  assert.equal(containerState('in-progress', 0), 'in-progress')
 
-  const empty = buildInitiative({
-    slug: 'app-shell',
-    dir: 'initiatives/i-app-shell',
-    ticket: "---\ntype: initiative\ntitle: 'App Shell'\nstatus: 'done'\n---\n",
-    epics: [],
+test('a silent container reads its children', () => {
+  // BMAD leaves the status absent until the first ticket starts, so silence is
+  // the absence of a fact rather than a fact. The children carry it.
+  assert.equal(containerState(null, []), 'backlog')
+  assert.equal(containerState(null, ['done', 'dropped']), 'done')
+  assert.equal(containerState(null, ['done', 'backlog']), 'in-progress')
+  assert.equal(containerState(null, ['in-progress']), 'in-progress')
+  assert.equal(containerState('', []), 'backlog')
+})
+
+test('a declared status is believed, whatever the children say', () => {
+  // An initiative finished and later stripped of its tickets is indistinguishable
+  // from one that never started. Only the person who did it can tell them apart,
+  // so the file wins and the board does not overrule it.
+  assert.equal(containerState('done', []), 'done')
+  assert.equal(containerState('done', ['backlog']), 'done')
+  assert.equal(containerState('in-progress', ['done']), 'in-progress')
+  assert.equal(containerState('dropped', []), 'dropped')
+})
+
+test('a live initiative reads in progress from its epics', () => {
+  const model = buildInitiative({
+    slug: 'vip-reservations',
+    dir: 'initiatives/i-vip',
+    ticket: "---\ntype: initiative\ntitle: 'VIP'\n---\n",
+    epics: [
+      {
+        id: 1, slug: 'epic-one', title: 'One', folder: 'x',
+        ticket: "---\ntype: epic\ntitle: 'One'\nstatus: 'done'\n---\n",
+        storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+      },
+      {
+        id: 2, slug: 'epic-two', title: 'Two', folder: 'y',
+        ticket: "---\ntype: epic\ntitle: 'Two'\n---\n",
+        storyIndex: storyIndex(0), files: [],
+      },
+    ],
   })
-  assert.equal(empty.status, 'backlog')
-  assert.equal(empty.rawStatus, 'done', 'the file is not overwritten, only outvoted')
-  // and it is not settled, so it stays with the open work
-  assert.equal(SETTLED.has(empty.status), false)
+  assert.equal(model.epics[0].status, 'done', 'a finished epic reads finished')
+  assert.equal(model.epics[1].status, 'backlog', 'an empty epic has not started')
+  assert.equal(model.status, 'in-progress', 'and the initiative holding both is live')
+})
+
+test('a silent epic whose tickets are all settled reads done', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\n---\n",
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\n---\n",
+      storyIndex: storyIndex(2), files: [leaf(1, 'done'), leaf(2, 'dropped')],
+    }],
+  })
+  assert.equal(model.epics[0].status, 'done')
+  assert.equal(model.status, 'done', 'and so does the initiative above it')
 })
