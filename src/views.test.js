@@ -449,3 +449,35 @@ test('the board says what is next and offers the right skill for it', async () =
   const e2 = found.find((element) => element.props?.id === 'E2')
   assert.ok(e2, 'the unsliced epic is reported')
 })
+
+test('requirement coverage is on screen even when nothing is wrong', async () => {
+  const Board = loadBoard()
+  const io = face({
+    ...FILES,
+    '_bmad-output/initiative-open/initiative-open.md':
+      "---\ntype: initiative\ntitle: 'Open work'\nstatus: 'in-progress'\n---\n\n"
+      + '## Requirements\n\n- R1 (a): one thing\n- R2 (b): another\n',
+    '_bmad-output/initiative-open/tickets/epic-a/epic-a.md':
+      "---\ntype: epic\ntitle: 'Epic A'\nparent: open\nstatus: 'in-progress'\n---\n",
+    '_bmad-output/initiative-open/tickets/epic-a/tickets/story-wire-the-panel.md':
+      "---\nid: '1'\ntype: story\ntitle: 'Wire the panel'\nstatus: 'done'\n---\n",
+  })
+  const props = {
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { actions: {}, signal: new AbortController().signal } }),
+    sessionId: 'session-coverage',
+    readWorkspaceFile: io.read,
+    listWorkspaceDir: io.list,
+    statWorkspacePath: io.stat,
+    fileAddress: (path) => path,
+  }
+  const first = await settle(Board, props)
+  elements(first).find((element) => element.name === 'Card').props.onOpen()
+  const second = await settle(Board, props, { reset: false })
+
+  const line = elements(second).find((element) => element.props?.className === 'bmad-sb-coverage')
+  assert.ok(line, 'the coverage line rendered')
+  // two requirements declared, neither covered by a ticket
+  const text = JSON.stringify(line)
+  assert.match(text, /coverageLine/)
+})

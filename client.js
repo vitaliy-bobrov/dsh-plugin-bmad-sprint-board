@@ -597,6 +597,7 @@ window.__ModuleLoader__.load({
           slug: row.slug,
           title: row.title ?? '',
           after: Array.isArray(row.after) ? row.after.map(String) : [],
+          covers: Array.isArray(row.covers) ? row.covers.map(String) : [],
         }))
     }
 
@@ -615,6 +616,8 @@ window.__ModuleLoader__.load({
         type: typeof row.type === 'string' ? row.type : 'story',
         title: typeof row.title === 'string' ? row.title : '',
         v6Key: typeof row.v6_key === 'string' ? row.v6_key : null,
+        // Review patches a build wrote down and never ticked off. Counting them is
+        // the whole of B3: a ticked box is a patch that was applied.
         // what this ticket waits for, in `<epic id>.<entry id>` refs
         after: Array.isArray(row.after) ? row.after.map(String) : [],
         covers: Array.isArray(row.covers) ? row.covers.map(String) : [],
@@ -665,9 +668,13 @@ window.__ModuleLoader__.load({
      * @returns {{path: string, title: string|null, type: string|null, status: string|null, ticket: string|null, baseline: string|null, context: string[]}} the plan.
      */
     function readPlan(text, path) {
-      const { data } = readFrontmatter(text)
+      const { data, body } = readFrontmatter(text)
       return {
         path,
+        // Review patches a build wrote down and never ticked off. Counting them is
+        // the whole of B3: a ticked box is a patch that was applied.
+        openPatches: (body.match(/^[ \t]*[-*][ \t]+\[[ \t]\][ \t]+\[Review\]\[Patch\]/gm) ?? []).length,
+        totalPatches: (body.match(/\[Review\]\[Patch\]/g) ?? []).length,
         title: stringOf(data, 'title'),
         type: stringOf(data, 'type'),
         ticket: stringOf(data, 'ticket'),
@@ -835,6 +842,109 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Requirements, and what covers them.
+     *
+     * v7 keeps requirements in the initiative's own file, one bullet each:
+     *
+     *   ## Requirements
+     *
+     *   - R1 (EXPERIENCE Foundation, architecture AD-4): All-Access tier eligibility...
+     *
+     * and records coverage on the containers and tickets that deliver them, as a
+     * `covers` list of those ids on both epics and entries. So the map v6 built from
+     * an FR Coverage Map is still here -- it simply moved into the ticket store.
+     *
+     * The board's question is the same one: which requirements did the plan claim,
+     * and which of them has nothing behind it.
+     *
+     * @module dsh-plugin-bmad-sprint-board/requirements
+     */
+
+    /** A requirement bullet, with its optional source note. */
+    const REQUIREMENT = /^[-*][ \t]+(R\d+)\b[ \t]*(?:\(([^)]*)\))?[ \t]*:?[ \t]*(.*)$/
+    /** The section that holds them. */
+    const REQUIREMENTS_SECTION = /^##[ \t]+Requirements[ \t]*$/
+    /** Any other heading ends it. */
+    const OTHER_SECTION = /^##[ \t]+/
+
+    /**
+     * Read the requirements an initiative declares.
+     *
+     * Only the `## Requirements` section is read: a bare `- R1` elsewhere in the file
+     * is a reference to a requirement, not a declaration of one.
+     *
+     * @param {string|null} text - the initiative ticket's contents.
+     * @returns {Array<{id: string, source: string, text: string}>} the requirements, in file order.
+     */
+    function parseRequirements(text) {
+      if (typeof text !== 'string') return []
+
+      const found = []
+      let inside = false
+      for (const line of String(text).split('\n')) {
+        if (REQUIREMENTS_SECTION.test(line)) {
+          inside = true
+          continue
+        }
+        if (!inside) continue
+        if (OTHER_SECTION.test(line)) {
+          inside = false
+          continue
+        }
+        const match = REQUIREMENT.exec(line.trim())
+        if (match === null) continue
+        const [, id, source, body] = match
+        found.push({ id, source: (source ?? '').trim(), text: body.trim() })
+      }
+      return found
+    }
+
+    /**
+     * Which requirement ids the containers and tickets claim to cover.
+     *
+     * @param {object} initiative - from `buildInitiative`.
+     * @returns {Map<string, Array<{ref: string, epic: string, status: string}>>} requirement id -> what covers it.
+     */
+    function coverageOf(initiative) {
+      const coverage = new Map()
+      const add = (id, entry) => {
+        if (!coverage.has(id)) coverage.set(id, [])
+        coverage.get(id).push(entry)
+      }
+
+      for (const epic of initiative.epics) {
+        // An epic's own `covers` is a claim about the epic, not about one ticket, so
+        // it is attributed to the epic rather than invented onto a story.
+        for (const id of epic.covers ?? []) {
+          add(id, { ref: epic.slug, epic: epic.slug, status: epic.status, container: true })
+        }
+        for (const ticket of epic.tickets) {
+          for (const id of ticket.covers ?? []) {
+            add(id, { ref: ticket.ref, epic: epic.slug, status: ticket.status, container: false })
+          }
+        }
+      }
+      return coverage
+    }
+
+    /**
+     * Reduce a requirement to the state its coverage supports.
+     *
+     * `uncovered` is its own answer, distinct from "not started": a requirement with
+     * nothing behind it was never planned, which is a planning gap rather than
+     * unfinished work.
+     *
+     * @param {Array<{status: string, container: boolean}>|undefined} covering - what claims it.
+     * @returns {'covered'|'partial'|'uncovered'} the state.
+     */
+    function coverageState(covering) {
+      if (covering === undefined || covering.length === 0) return 'uncovered'
+      const settled = covering.filter((entry) => entry.status === 'done' || entry.status === 'dropped')
+      if (settled.length === covering.length) return 'covered'
+      return 'partial'
+    }
+
+    /**
      * The board model: one BMAD v7 project, read into initiatives, epics and tickets.
      *
      * The model is built from text alone -- it never touches the file system, so it
@@ -846,6 +956,7 @@ window.__ModuleLoader__.load({
      *
      * @module dsh-plugin-bmad-sprint-board/model
      */
+
 
 
 
@@ -1010,6 +1121,7 @@ window.__ModuleLoader__.load({
     function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable = 0 }) {
       const own = readInitiativeTicket(ticket)
       const ledger = parseDeferred(deferred)
+      const requirements = parseRequirements(ticket)
       const built = epics.map((epic) => {
         const header = readEpicTicket(epic.ticket)
         const entries = readStoryIndex(epic.storyIndex)
@@ -1084,6 +1196,7 @@ window.__ModuleLoader__.load({
           id: epic.id,
           slug: epic.slug,
           folder: epic.folder,
+          covers: epic.covers ?? [],
           title: header.title ?? epic.title ?? epic.slug,
           // A container's status is absent until its first ticket starts, which is a
           // statement about the work rather than a gap in the file: it has not
@@ -1115,6 +1228,7 @@ window.__ModuleLoader__.load({
         status: containerState(own.status, built.map((epic) => epic.status)),
         rawStatus: own.status,
         epics: built,
+        requirements,
         deferred: ledger.sections,
         counts: {
           deferred: ledger.count,
@@ -1214,6 +1328,7 @@ window.__ModuleLoader__.load({
 
 
 
+
     /** How much a gap matters, highest first. */
     const SEVERITY = ['high', 'medium', 'low']
 
@@ -1247,6 +1362,86 @@ window.__ModuleLoader__.load({
       const gaps = []
       const unverifiable = []
       const where = initiative.slug
+
+
+      // A requirement nothing claims to cover was never planned. It is not "not
+      // done": no ticket exists that could have done it, which is a planning gap and
+      // reads differently from unfinished work.
+      const coverage = coverageOf(initiative)
+      const uncovered = (initiative.requirements ?? [])
+        .filter((requirement) => coverageState(coverage.get(requirement.id)) === 'uncovered')
+      if (uncovered.length > 0) {
+        gaps.push(gap({
+          id: 'REQ',
+          title: 'requirements nothing covers',
+          severity: 'medium',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence:
+            `${uncovered.length} of ${initiative.requirements.length} declared requirement(s) have `
+            + 'no epic and no ticket listing them in `covers`.',
+          action: ask(
+            `In ${where}, these requirements are declared but nothing covers them: `
+            + `${uncovered.map((r) => r.id).join(', ')}. Add them to the \`covers\` of the epic or `
+            + 'ticket that delivers each, or drop the requirement.',
+          ),
+        }))
+      }
+
+      // Work deferred off a ticket, on a ticket the store already calls finished. The
+      // deferral was a live decision and the completion is a later one; both can be
+      // true, but the board should say the finished thing still owes something.
+      const settledTickets = initiative.epics
+        .flatMap((epic) => epic.tickets)
+        .filter((ticket) => SETTLED.has(ticket.status))
+      const owing = []
+      for (const section of initiative.deferred ?? []) {
+        const named = settledTickets.find((ticket) => {
+          const file = (ticket.plan?.path ?? ticket.leaf?.path ?? '').split('/').pop()
+          return file !== '' && section.source.includes(file)
+        })
+        if (named !== undefined) owing.push({ section, ticket: named })
+      }
+      if (owing.length > 0) {
+        const count = owing.reduce((n, entry) => n + entry.section.items.length, 0)
+        gaps.push(gap({
+          id: 'B1',
+          title: 'finished tickets that still owe work',
+          severity: 'medium',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence:
+            `${count} deferred item(s) were set aside by a ticket the store now calls settled `
+            + `(${owing.map((entry) => entry.ticket.ref).join(', ')}).`,
+          action: ask(
+            `In ${where}, ${count} deferred item(s) came from tickets that are now settled. `
+            + `Decide for each whether it is still owed: ${owing.flatMap((entry) => entry.section.items).slice(0, 3).join(' | ')}`,
+          ),
+        }))
+      }
+
+      // Review patches a build wrote down and never ticked. A settled ticket with
+      // unticked patches says the review found work and the completion ignored it.
+      const patched = initiative.epics
+        .flatMap((epic) => epic.tickets)
+        .filter((ticket) => SETTLED.has(ticket.status) && (ticket.plan?.openPatches ?? 0) > 0)
+      if (patched.length > 0) {
+        const count = patched.reduce((n, ticket) => n + ticket.plan.openPatches, 0)
+        gaps.push(gap({
+          id: 'B3',
+          title: 'review patches never applied',
+          severity: 'high',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence:
+            `${count} unticked [Review][Patch] item(s) across ${patched.length} settled ticket(s).`,
+          action: ask(
+            `In ${where}, these settled tickets still have unticked [Review][Patch] items: `
+            + `${patched.map((ticket) => `${ticket.ref} (${ticket.plan.openPatches})`).join(', ')}. `
+            + 'Apply them or tick them off.',
+          ),
+        }))
+      }
 
       // An epic nobody has sliced yet is why the lanes below it are empty, so it is
       // the first thing the board says rather than the last.
@@ -1666,6 +1861,11 @@ window.__ModuleLoader__.load({
         border-radius: 8px;
         background: var(--dsw-alias-bg-secondary);
         border: 1px solid var(--dsw-alias-border-secondary);
+      }
+      .bmad-sb-coverage {
+        font-size: 12px;
+        color: var(--dsw-alias-label-secondary);
+        margin: -4px 0 10px;
       }
       .bmad-sb-nextlabel {
         font-size: 11px;
@@ -2850,6 +3050,26 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
               }),
             );
 
+      // The requirement map: which declared requirements the tickets claim to
+      // cover. Shown even when nothing is wrong, because "no finding" and "no
+      // check" must not look the same on screen.
+      const coverage = coverageOf(initiative);
+      const coverageCounts = (initiative.requirements ?? []).reduce((acc, requirement) => {
+        acc[coverageState(coverage.get(requirement.id))] += 1;
+        return acc;
+      }, { covered: 0, partial: 0, uncovered: 0 });
+      const coverageLine =
+        (initiative.requirements ?? []).length === 0
+          ? null
+          : h('div', { className: 'bmad-sb-coverage' },
+              t('coverageLine', {
+                total: initiative.requirements.length,
+                covered: coverageCounts.covered,
+                partial: coverageCounts.partial,
+                uncovered: coverageCounts.uncovered,
+              }),
+            );
+
       const detected = detectInitiative(initiative);
       const empty = detectEmptyInitiative(initiative);
       const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
@@ -2882,6 +3102,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         'div',
         null,
         nextLine,
+        coverageLine,
         lanes.length === 0 ? h('div', { className: 'bmad-sb-note' }, t('noTickets')) : lanes,
         unreadable > 0
           ? h(
@@ -3268,6 +3489,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
+      'coverageLine': 'requirements: {covered} of {total} covered, {partial} partial, {uncovered} uncovered',
       'nextLabel': 'Next',
       'askAgent': 'Ask agent',
       'nextContinue': 'Continue {ref} -- {title}',
@@ -3343,6 +3565,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'coverageLine': '\u9700\u6c42\uff1a{total} \u9879\u4e2d {covered} \u9879\u5df2\u8986\u76d6\uff0c{partial} \u9879\u90e8\u5206\uff0c{uncovered} \u9879\u672a\u8986\u76d6',
       'nextLabel': '\u4e0b\u4e00\u6b65',
       'askAgent': '\u8ba9\u667a\u80fd\u4f53\u5904\u7406',
       'nextContinue': '\u7ee7\u7eed {ref} -- {title}',

@@ -11,6 +11,11 @@
         background: var(--dsw-alias-bg-secondary);
         border: 1px solid var(--dsw-alias-border-secondary);
       }
+      .bmad-sb-coverage {
+        font-size: 12px;
+        color: var(--dsw-alias-label-secondary);
+        margin: -4px 0 10px;
+      }
       .bmad-sb-nextlabel {
         font-size: 11px;
         font-weight: 600;
@@ -1194,6 +1199,26 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
               }),
             );
 
+      // The requirement map: which declared requirements the tickets claim to
+      // cover. Shown even when nothing is wrong, because "no finding" and "no
+      // check" must not look the same on screen.
+      const coverage = coverageOf(initiative);
+      const coverageCounts = (initiative.requirements ?? []).reduce((acc, requirement) => {
+        acc[coverageState(coverage.get(requirement.id))] += 1;
+        return acc;
+      }, { covered: 0, partial: 0, uncovered: 0 });
+      const coverageLine =
+        (initiative.requirements ?? []).length === 0
+          ? null
+          : h('div', { className: 'bmad-sb-coverage' },
+              t('coverageLine', {
+                total: initiative.requirements.length,
+                covered: coverageCounts.covered,
+                partial: coverageCounts.partial,
+                uncovered: coverageCounts.uncovered,
+              }),
+            );
+
       const detected = detectInitiative(initiative);
       const empty = detectEmptyInitiative(initiative);
       const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
@@ -1226,6 +1251,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         'div',
         null,
         nextLine,
+        coverageLine,
         lanes.length === 0 ? h('div', { className: 'bmad-sb-note' }, t('noTickets')) : lanes,
         unreadable > 0
           ? h(
@@ -1612,6 +1638,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
+      'coverageLine': 'requirements: {covered} of {total} covered, {partial} partial, {uncovered} uncovered',
       'nextLabel': 'Next',
       'askAgent': 'Ask agent',
       'nextContinue': 'Continue {ref} -- {title}',
@@ -1687,6 +1714,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'coverageLine': '\u9700\u6c42\uff1a{total} \u9879\u4e2d {covered} \u9879\u5df2\u8986\u76d6\uff0c{partial} \u9879\u90e8\u5206\uff0c{uncovered} \u9879\u672a\u8986\u76d6',
       'nextLabel': '\u4e0b\u4e00\u6b65',
       'askAgent': '\u8ba9\u667a\u80fd\u4f53\u5904\u7406',
       'nextContinue': '\u7ee7\u7eed {ref} -- {title}',

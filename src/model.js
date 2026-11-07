@@ -13,6 +13,7 @@
 
 import { readFrontmatter, stringOf } from './frontmatter.js'
 import { parseDeferred } from './deferred.js'
+import { parseRequirements } from './requirements.js'
 import { classify, readLeaf, readPlan, readStoryIndex, slugify } from './store.js'
 
 /**
@@ -174,6 +175,7 @@ export function ticketStatus(plan, leaf) {
 export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable = 0 }) {
   const own = readInitiativeTicket(ticket)
   const ledger = parseDeferred(deferred)
+  const requirements = parseRequirements(ticket)
   const built = epics.map((epic) => {
     const header = readEpicTicket(epic.ticket)
     const entries = readStoryIndex(epic.storyIndex)
@@ -248,6 +250,7 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
       id: epic.id,
       slug: epic.slug,
       folder: epic.folder,
+      covers: epic.covers ?? [],
       title: header.title ?? epic.title ?? epic.slug,
       // A container's status is absent until its first ticket starts, which is a
       // statement about the work rather than a gap in the file: it has not
@@ -279,6 +282,7 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
     status: containerState(own.status, built.map((epic) => epic.status)),
     rawStatus: own.status,
     epics: built,
+    requirements,
     deferred: ledger.sections,
     counts: {
       deferred: ledger.count,

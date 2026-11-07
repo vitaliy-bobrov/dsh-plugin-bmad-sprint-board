@@ -17,6 +17,7 @@
  */
 
 import { SETTLED } from './model.js'
+import { coverageOf, coverageState } from './requirements.js'
 
 /** How much a gap matters, highest first. */
 export const SEVERITY = ['high', 'medium', 'low']
@@ -51,6 +52,86 @@ export function detectInitiative(initiative) {
   const gaps = []
   const unverifiable = []
   const where = initiative.slug
+
+
+  // A requirement nothing claims to cover was never planned. It is not "not
+  // done": no ticket exists that could have done it, which is a planning gap and
+  // reads differently from unfinished work.
+  const coverage = coverageOf(initiative)
+  const uncovered = (initiative.requirements ?? [])
+    .filter((requirement) => coverageState(coverage.get(requirement.id)) === 'uncovered')
+  if (uncovered.length > 0) {
+    gaps.push(gap({
+      id: 'REQ',
+      title: 'requirements nothing covers',
+      severity: 'medium',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence:
+        `${uncovered.length} of ${initiative.requirements.length} declared requirement(s) have `
+        + 'no epic and no ticket listing them in `covers`.',
+      action: ask(
+        `In ${where}, these requirements are declared but nothing covers them: `
+        + `${uncovered.map((r) => r.id).join(', ')}. Add them to the \`covers\` of the epic or `
+        + 'ticket that delivers each, or drop the requirement.',
+      ),
+    }))
+  }
+
+  // Work deferred off a ticket, on a ticket the store already calls finished. The
+  // deferral was a live decision and the completion is a later one; both can be
+  // true, but the board should say the finished thing still owes something.
+  const settledTickets = initiative.epics
+    .flatMap((epic) => epic.tickets)
+    .filter((ticket) => SETTLED.has(ticket.status))
+  const owing = []
+  for (const section of initiative.deferred ?? []) {
+    const named = settledTickets.find((ticket) => {
+      const file = (ticket.plan?.path ?? ticket.leaf?.path ?? '').split('/').pop()
+      return file !== '' && section.source.includes(file)
+    })
+    if (named !== undefined) owing.push({ section, ticket: named })
+  }
+  if (owing.length > 0) {
+    const count = owing.reduce((n, entry) => n + entry.section.items.length, 0)
+    gaps.push(gap({
+      id: 'B1',
+      title: 'finished tickets that still owe work',
+      severity: 'medium',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence:
+        `${count} deferred item(s) were set aside by a ticket the store now calls settled `
+        + `(${owing.map((entry) => entry.ticket.ref).join(', ')}).`,
+      action: ask(
+        `In ${where}, ${count} deferred item(s) came from tickets that are now settled. `
+        + `Decide for each whether it is still owed: ${owing.flatMap((entry) => entry.section.items).slice(0, 3).join(' | ')}`,
+      ),
+    }))
+  }
+
+  // Review patches a build wrote down and never ticked. A settled ticket with
+  // unticked patches says the review found work and the completion ignored it.
+  const patched = initiative.epics
+    .flatMap((epic) => epic.tickets)
+    .filter((ticket) => SETTLED.has(ticket.status) && (ticket.plan?.openPatches ?? 0) > 0)
+  if (patched.length > 0) {
+    const count = patched.reduce((n, ticket) => n + ticket.plan.openPatches, 0)
+    gaps.push(gap({
+      id: 'B3',
+      title: 'review patches never applied',
+      severity: 'high',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence:
+        `${count} unticked [Review][Patch] item(s) across ${patched.length} settled ticket(s).`,
+      action: ask(
+        `In ${where}, these settled tickets still have unticked [Review][Patch] items: `
+        + `${patched.map((ticket) => `${ticket.ref} (${ticket.plan.openPatches})`).join(', ')}. `
+        + 'Apply them or tick them off.',
+      ),
+    }))
+  }
 
   // An epic nobody has sliced yet is why the lanes below it are empty, so it is
   // the first thing the board says rather than the last.

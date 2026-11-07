@@ -64,6 +64,7 @@ export function readEpicIndex(text) {
       slug: row.slug,
       title: row.title ?? '',
       after: Array.isArray(row.after) ? row.after.map(String) : [],
+      covers: Array.isArray(row.covers) ? row.covers.map(String) : [],
     }))
 }
 
@@ -82,6 +83,8 @@ export function readStoryIndex(text) {
     type: typeof row.type === 'string' ? row.type : 'story',
     title: typeof row.title === 'string' ? row.title : '',
     v6Key: typeof row.v6_key === 'string' ? row.v6_key : null,
+    // Review patches a build wrote down and never ticked off. Counting them is
+    // the whole of B3: a ticked box is a patch that was applied.
     // what this ticket waits for, in `<epic id>.<entry id>` refs
     after: Array.isArray(row.after) ? row.after.map(String) : [],
     covers: Array.isArray(row.covers) ? row.covers.map(String) : [],
@@ -132,9 +135,13 @@ export function classify(text) {
  * @returns {{path: string, title: string|null, type: string|null, status: string|null, ticket: string|null, baseline: string|null, context: string[]}} the plan.
  */
 export function readPlan(text, path) {
-  const { data } = readFrontmatter(text)
+  const { data, body } = readFrontmatter(text)
   return {
     path,
+    // Review patches a build wrote down and never ticked off. Counting them is
+    // the whole of B3: a ticked box is a patch that was applied.
+    openPatches: (body.match(/^[ \t]*[-*][ \t]+\[[ \t]\][ \t]+\[Review\]\[Patch\]/gm) ?? []).length,
+    totalPatches: (body.match(/\[Review\]\[Patch\]/g) ?? []).length,
     title: stringOf(data, 'title'),
     type: stringOf(data, 'type'),
     ticket: stringOf(data, 'ticket'),

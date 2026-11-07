@@ -64,6 +64,7 @@ const pieces = [
   inline(read('config.js')),
   inline(read('store.js')),
   inline(read('deferred.js')),
+  inline(read('requirements.js')),
   inline(read('model.js')),
   inline(read('detect.js')),
   inline(read('scan.js')),

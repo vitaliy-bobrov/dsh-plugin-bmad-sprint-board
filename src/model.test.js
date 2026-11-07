@@ -393,3 +393,82 @@ test('a ticket with an unrecognised status is never offered as next', () => {
   // 1.1 is unknown, so the only thing that can be offered is the other ticket
   assert.notEqual(next.kind === 'start' && next.ticket.ref, '1.1')
 })
+
+test('REQ fires when nothing covers a declared requirement', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "## Requirements\n\n- R1 (a): one\n- R2 (b): two\n",
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f', covers: ['R1'],
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'done'\n---\n",
+      storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+    }],
+  })
+  assert.equal(model.requirements.length, 2)
+  const { gaps } = detectInitiative(model)
+  const req = gaps.find((g) => g.id === 'REQ')
+  assert.ok(req, 'REQ fired')
+  assert.match(req.evidence, /1 of 2/)
+})
+
+test('REQ stays quiet when every requirement is claimed', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "## Requirements\n\n- R1 (a): one\n",
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f', covers: ['R1'],
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'done'\n---\n",
+      storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+    }],
+  })
+  const { gaps } = detectInitiative(model)
+  assert.equal(gaps.filter((g) => g.id === 'REQ').length, 0)
+})
+
+test('B3 fires for unticked review patches on a settled ticket', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\nstatus: 'in-progress'\n---\n",
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'in-progress'\n---\n",
+      storyIndex: storyIndex(1),
+      files: [
+        leaf(1, 'done'),
+        {
+          path: `${DIR}/story-ticket-1-plan.md`,
+          text: "---\ntype: feature\nticket: '1'\nstatus: 'done'\n---\n"
+            + '\n- [x] [Review][Patch] applied\n- [ ] [Review][Patch] never applied\n',
+        },
+      ],
+    }],
+  })
+  const { gaps } = detectInitiative(model)
+  const b3 = gaps.find((g) => g.id === 'B3')
+  assert.ok(b3, 'B3 fired')
+  assert.match(b3.evidence, /1 unticked/)
+})
+
+test('B1 fires when a deferred item came from a settled ticket', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\nstatus: 'in-progress'\n---\n",
+    deferred: '## Deferred from: code review of story-ticket-1-plan.md (2026-10-27)\n\n- an item\n',
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'in-progress'\n---\n",
+      storyIndex: storyIndex(1),
+      files: [
+        leaf(1, 'done'),
+        {
+          path: `${DIR}/story-ticket-1-plan.md`,
+          text: "---\ntype: feature\nticket: '1'\nstatus: 'done'\n---\n",
+        },
+      ],
+    }],
+  })
+  const { gaps } = detectInitiative(model)
+  const b1 = gaps.find((g) => g.id === 'B1')
+  assert.ok(b1, 'B1 fired')
+  assert.match(b1.evidence, /1 deferred item/)
+})

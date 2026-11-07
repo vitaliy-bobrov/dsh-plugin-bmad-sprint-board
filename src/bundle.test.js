@@ -156,3 +156,25 @@ test('a v6 project is told which version reads it', () => {
     'the v6 notice names the version to install')
   assert.ok(/v7/.test(source), 'and says which version this board reads')
 })
+
+test('no two inlined modules declare the same top-level name', () => {
+  // Everything in src/ lands in one factory scope, so two modules each declaring
+  // `const SECTION` is a syntax error in the bundle and nowhere else. The parser
+  // reports it as a duplicate identifier with no file named, which is a slow
+  // thing to chase; this says which names and where.
+  const files = readdirSync(new URL('./', import.meta.url))
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.test.js') && name !== 'index.js')
+  const seen = new Map()
+  const clashes = []
+  for (const file of files) {
+    const text = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
+    for (const m of text.matchAll(/^(?:const|let|function) ([A-Za-z_$][\w$]*)/gm)) {
+      const name = m[1]
+      if (seen.has(name) && seen.get(name) !== file) {
+        clashes.push(`${name} (${seen.get(name)} + ${file})`)
+      }
+      seen.set(name, file)
+    }
+  }
+  assert.deepEqual(clashes, [], `top-level names collide: ${clashes.join(', ')}`)
+})
