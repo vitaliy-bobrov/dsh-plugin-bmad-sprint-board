@@ -110,6 +110,11 @@ export function readLeaf(text, path) {
     title: stringOf(data, 'title'),
     // an absent status is the empty string, which the store maps to backlog
     status: stringOf(data, 'status') ?? '',
+    assignee: stringOf(data, 'assignee'),
+    risk: stringOf(data, 'risk'),
+    estimate: stringOf(data, 'estimate'),
+    review: stringOf(data, 'review'),
+    blockedReason: stringOf(data, 'blocked_reason'),
   }
 }
 

@@ -23,13 +23,43 @@ import { coverageOf, coverageState } from './requirements.js'
 export const SEVERITY = ['high', 'medium', 'low']
 
 /**
+ * Which headline a check belongs to.
+ *
+ * Two numbers, two meanings, never blended. **Unfinished** is work that was
+ * committed and is not delivered -- promise against completion. **Does not add
+ * up** is two records disagreeing about one fact -- record against record. The
+ * two `note` checks are facts rather than debts: shown once with a count so they
+ * stay visible, but never added to either number, because an initiative nobody
+ * has sliced and a file the store cannot classify are not work anyone promised.
+ */
+export const BUCKETS = {
+  REQ: 'unfinished',
+  B1: 'unfinished',
+  B3: 'unfinished',
+  U1: 'unfinished',
+  U2: 'unfinished',
+  E2: 'unfinished',
+  C1: 'contradiction',
+  C2: 'contradiction',
+  L2: 'contradiction',
+  L3: 'contradiction',
+  L4: 'contradiction',
+  L1: 'note',
+  E1: 'note',
+}
+
+/**
  * Build one gap in the shape every view renders.
  *
+ * `items` is what the headline counts: the things a reader would have to work
+ * through, not the findings that describe them. One finding covering eleven
+ * unticked patches is eleven items, because eleven patches is what the work is.
+ *
  * @param {object} spec - the gap's fields.
- * @returns {object} the gap.
+ * @returns {object} the gap, carrying its bucket and its item count.
  */
-function gap({ id, title, severity, subject, subjectKind, evidence, action }) {
-  return { id, title, severity, subject, subjectKind, evidence, action }
+function gap({ id, title, severity, subject, subjectKind, evidence, action, items = 1 }) {
+  return { id, title, severity, subject, subjectKind, evidence, action, items, bucket: BUCKETS[id] ?? 'note' }
 }
 
 /**
@@ -63,6 +93,7 @@ export function detectInitiative(initiative) {
   if (uncovered.length > 0) {
     gaps.push(gap({
       id: 'REQ',
+      items: uncovered.length,
       title: 'requirements nothing covers',
       severity: 'medium',
       subject: where,
@@ -96,6 +127,7 @@ export function detectInitiative(initiative) {
     const count = owing.reduce((n, entry) => n + entry.section.items.length, 0)
     gaps.push(gap({
       id: 'B1',
+      items: count,
       title: 'finished tickets that still owe work',
       severity: 'medium',
       subject: where,
@@ -119,6 +151,7 @@ export function detectInitiative(initiative) {
     const count = patched.reduce((n, ticket) => n + ticket.plan.openPatches, 0)
     gaps.push(gap({
       id: 'B3',
+      items: count,
       title: 'review patches never applied',
       severity: 'high',
       subject: where,
@@ -161,6 +194,7 @@ export function detectInitiative(initiative) {
   if (undelivered.length > 0) {
     gaps.push(gap({
       id: 'U2',
+      items: undelivered.length,
       title: 'UX components no epic delivers',
       severity: 'medium',
       subject: where,
@@ -194,6 +228,7 @@ export function detectInitiative(initiative) {
     const example = ignored[0]
     gaps.push(gap({
       id: 'L1',
+      items: ignored.length,
       title: 'ticket files the store cannot read',
       severity: 'high',
       subject: where,
@@ -216,6 +251,7 @@ export function detectInitiative(initiative) {
   if (unlisted.length > 0) {
     gaps.push(gap({
       id: 'L2',
+      items: unlisted.length,
       title: 'ticket files no index entry lists',
       severity: 'medium',
       subject: where,
@@ -234,6 +270,7 @@ export function detectInitiative(initiative) {
   if (orphans.length > 0) {
     gaps.push(gap({
       id: 'L3',
+      items: orphans.length,
       title: 'plans no ticket claims',
       severity: 'medium',
       subject: where,
@@ -246,23 +283,24 @@ export function detectInitiative(initiative) {
     }))
   }
 
-  // A status word the board does not know is shown, but never counted as
-  // settled: guessing that an unfamiliar word means finished is how a board
-  // starts lying.
+  // A status word the store does not define. This is a contradiction rather than
+  // a gap: the store's vocabulary is fixed, so a word outside it is a record the
+  // tooling cannot read, not work anyone failed to do.
   const odd = initiative.epics.flatMap((epic) =>
     epic.tickets
       .filter((ticket) => ticket.status === 'unknown')
       .map((ticket) => ({ epic, ticket })))
   if (odd.length > 0) {
-    unverifiable.push({
+    gaps.push(gap({
       id: 'L4',
-      title: 'unrecognised status words',
+      items: odd.length,
+      title: 'status words the store does not define',
+      severity: 'medium',
       subject: where,
       subjectKind: 'initiative',
-      evidence: `${odd.length} ticket(s) carry a status this board does not recognise, so they are not counted either way.`,
-      tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.word})`),
+      evidence: `${odd.length} ticket(s) carry a status word the store does not recognise, so they are counted in no lane it defines.`,
       action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.word}`).join(', ')}. Confirm what they mean.`),
-    })
+    }))
   }
 
   // A container whose status is settled while its tickets are not is the classic
@@ -303,6 +341,9 @@ export function detectInitiative(initiative) {
       }))
     }
   }
+
+  const empty = detectEmptyInitiative(initiative)
+  if (empty !== null) gaps.push(empty)
 
   return { gaps, unverifiable }
 }

@@ -168,10 +168,12 @@ test('L3 fires for a plan whose ticket names nothing', () => {
 
 test('L4 reports an unrecognised status word without counting it as settled', () => {
   const model = initiative({ files: [leaf(1, 'shipped'), leaf(2, 'done')] })
-  const { unverifiable } = detectInitiative(model)
-  const l4 = unverifiable.find((u) => u.id === 'L4')
+  const { gaps } = detectInitiative(model)
+  const l4 = gaps.find((g) => g.id === 'L4')
   assert.ok(l4, 'L4 fired')
-  assert.match(l4.tickets[0], /shipped/)
+  // a word the store cannot read is a contradiction, not unfinished work
+  assert.equal(l4.bucket, 'contradiction')
+  assert.match(l4.action.payload, /shipped/)
   assert.equal(model.counts.settled, 1)
 })
 

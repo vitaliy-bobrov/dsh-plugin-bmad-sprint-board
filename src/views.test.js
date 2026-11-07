@@ -180,7 +180,20 @@ function elements(node, into = []) {
 
 /** Every name in a tree, which is how a component's presence is asserted. */
 function names(node) {
-  return elements(node).map((element) => (typeof element.type === 'function' ? element.type.name : element.type))
+  return elements(node).map((element) => element.name
+    ?? (typeof element.type === 'function' ? element.type.name : element.type))
+}
+
+/** Expand any element-valued props, singly or in an array. */
+function expandProps(input) {
+  const isElement = (value) => value !== null && typeof value === 'object' && 'type' in value
+  const out = {}
+  for (const [key, value] of Object.entries(input ?? {})) {
+    if (isElement(value)) out[key] = expand(value)
+    else if (Array.isArray(value) && value.some(isElement)) out[key] = value.map(expand)
+    else out[key] = value
+  }
+  return out
 }
 
 /**
@@ -195,11 +208,15 @@ function names(node) {
 function expand(node) {
   if (Array.isArray(node)) return node.map(expand)
   if (node === null || typeof node !== 'object') return node
+  // A lane receives its cards as a prop rather than as children, and a collapsed
+  // lane never renders them -- so props are expanded too, or nothing behind a
+  // fold is reachable here.
+  const props = expandProps(node.props)
   if (typeof node.type === 'function') {
     const rendered = node.type({ ...node.props })
-    return { fn: node.type, name: node.type.name, props: node.props, rendered: expand(rendered) }
+    return { fn: node.type, name: node.type.name, props, rendered: expand(rendered) }
   }
-  return { name: node.type, props: node.props, children: (node.children ?? []).map(expand) }
+  return { name: node.type, props, children: (node.children ?? []).map(expand) }
 }
 
 /**
@@ -260,7 +277,7 @@ test('the header offers four views and the board renders the selected one', asyn
     fileAddress: (path) => path,
   })
 
-  const header = elements(tree).find((element) => element.type?.name === 'BoardHeader')
+  const header = elements(tree).find((element) => element.name === 'BoardHeader' || element.type?.name === 'BoardHeader')
   assert.ok(header, 'the header rendered')
   const segments = header.props.views ?? header.props.viewList ?? null
   // The view list is passed down; when it is not, the segment labels are built
@@ -480,4 +497,54 @@ test('requirement coverage is on screen even when nothing is wrong', async () =>
   // two requirements declared, neither covered by a ticket
   const text = JSON.stringify(line)
   assert.match(text, /coverageLine/)
+})
+
+test('the header shows two numbers, a requirements tab, and a quiet footnote', async () => {
+  const Board = loadBoard()
+  const io = face({
+    ...FILES,
+    '_bmad-output/initiative-open/initiative-open.md':
+      "---\ntype: initiative\ntitle: 'Open work'\nstatus: 'in-progress'\n---\n\n"
+      + '## Requirements\n\n- R1 (a): one thing\n- R2 (b): another\n',
+    '_bmad-output/initiative-open/tickets/epic-a/tickets/story-wire-the-panel.md':
+      "---\nid: '1'\ntype: story\ntitle: 'Wire the panel'\nstatus: 'done'\n"
+      + "assignee: 'amelia'\nrisk: 'high'\n---\n",
+    // an initiative with no epics: a note, not a debt
+    '_bmad-output/initiative-empty/initiative-empty.md':
+      "---\ntype: initiative\ntitle: 'Empty one'\nstatus: 'done'\n---\n",
+    // a file the store cannot classify: the other note, counted not shouted
+    '_bmad-output/initiative-open/tickets/epic-a/tickets/story-ghost-plan.md':
+      "---\ntype: feature\nstatus: 'done'\n---\n",
+  })
+  const props = {
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { actions: {}, signal: new AbortController().signal } }),
+    sessionId: 'session-v240',
+    readWorkspaceFile: io.read,
+    listWorkspaceDir: io.list,
+    statWorkspacePath: io.stat,
+    fileAddress: (path) => path,
+  }
+  const first = await settle(Board, props)
+  elements(first).find((element) => element.name === 'Card').props.onOpen()
+  const second = await settle(Board, props, { reset: false })
+
+  const found = elements(second)
+  // two numbers, side by side
+  const signal = found.find((element) => element.props?.className === 'bmad-sb-signal')
+  assert.ok(signal, 'the signal row rendered')
+  const nums = elements(signal).filter((element) => element.props?.className === 'bmad-sb-signalnum')
+  assert.equal(nums.length, 2, 'exactly two numbers')
+  // the footnote carries L1 and E1, not the findings
+  const json = JSON.stringify(second)
+  assert.ok(json.includes('bmad-sb-footnote'), `the footnote rendered; classes seen: ${
+    [...new Set(found.map((element) => element.props?.className).filter(Boolean))].join(' | ')}`)
+  // a ticket card names its assignee and risk
+  const cards = found.filter((element) => element.name === 'Card' || element.type?.name === 'Card')
+  const wire = cards.find((card) => card.props.title === 'Wire the panel')
+  assert.ok(wire, `the ticket card rendered; names: ${[...new Set(found.map((e) => e.name))].slice(0, 30).join(', ')}`)
+  assert.match(String(wire.props.note), /amelia/)
+  // the identity dictionary returns the key, so the risk is visible as its
+  // own segment rather than as the interpolated word
+  assert.match(String(wire.props.note), /riskPart/, 'and its risk')
 })

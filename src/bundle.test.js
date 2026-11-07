@@ -118,14 +118,14 @@ test('every declaration a source module exports survives into the bundle', () =>
 })
 
 
-test('the four views are present, in the order the header shows them', () => {
+test('the five views are present, in the order the header shows them', () => {
   // The header builds its segments from this list, so the order here is the
   // order a reader sees. A view that exists but is unreachable from the header
   // is the same as a missing one.
   const list = /const VIEWS = \[([^\]]*)\]/.exec(source)
   assert.ok(list !== null, 'the view list exists')
   const views = list[1].match(/'[a-z]+'/g).map((s) => s.slice(1, -1))
-  assert.deepEqual(views, ['status', 'epic', 'tickets', 'initiatives'])
+  assert.deepEqual(views, ['status', 'requirements', 'epic', 'tickets', 'initiatives'])
   for (const view of views) {
     assert.ok(new RegExp(`function ${view[0].toUpperCase()}${view.slice(1)}View\\(`).test(source),
       `${view} has a body`)

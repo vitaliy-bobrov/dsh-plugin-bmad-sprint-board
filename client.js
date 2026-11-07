@@ -643,6 +643,11 @@ window.__ModuleLoader__.load({
         title: stringOf(data, 'title'),
         // an absent status is the empty string, which the store maps to backlog
         status: stringOf(data, 'status') ?? '',
+        assignee: stringOf(data, 'assignee'),
+        risk: stringOf(data, 'risk'),
+        estimate: stringOf(data, 'estimate'),
+        review: stringOf(data, 'review'),
+        blockedReason: stringOf(data, 'blocked_reason'),
       }
     }
 
@@ -1285,6 +1290,11 @@ window.__ModuleLoader__.load({
             after: entry.after,
             covers: entry.covers,
             hitl: entry.hitl,
+            assignee: leaf?.assignee ?? null,
+            risk: leaf?.risk ?? null,
+            estimate: leaf?.estimate ?? null,
+            review: leaf?.review ?? null,
+            blockedReason: plan?.blockedReason ?? leaf?.blockedReason ?? null,
             word,
             status: ticketStatus(plan, leaf),
             plan,
@@ -1489,13 +1499,43 @@ window.__ModuleLoader__.load({
     const SEVERITY = ['high', 'medium', 'low']
 
     /**
+     * Which headline a check belongs to.
+     *
+     * Two numbers, two meanings, never blended. **Unfinished** is work that was
+     * committed and is not delivered -- promise against completion. **Does not add
+     * up** is two records disagreeing about one fact -- record against record. The
+     * two `note` checks are facts rather than debts: shown once with a count so they
+     * stay visible, but never added to either number, because an initiative nobody
+     * has sliced and a file the store cannot classify are not work anyone promised.
+     */
+    const BUCKETS = {
+      REQ: 'unfinished',
+      B1: 'unfinished',
+      B3: 'unfinished',
+      U1: 'unfinished',
+      U2: 'unfinished',
+      E2: 'unfinished',
+      C1: 'contradiction',
+      C2: 'contradiction',
+      L2: 'contradiction',
+      L3: 'contradiction',
+      L4: 'contradiction',
+      L1: 'note',
+      E1: 'note',
+    }
+
+    /**
      * Build one gap in the shape every view renders.
      *
+     * `items` is what the headline counts: the things a reader would have to work
+     * through, not the findings that describe them. One finding covering eleven
+     * unticked patches is eleven items, because eleven patches is what the work is.
+     *
      * @param {object} spec - the gap's fields.
-     * @returns {object} the gap.
+     * @returns {object} the gap, carrying its bucket and its item count.
      */
-    function gap({ id, title, severity, subject, subjectKind, evidence, action }) {
-      return { id, title, severity, subject, subjectKind, evidence, action }
+    function gap({ id, title, severity, subject, subjectKind, evidence, action, items = 1 }) {
+      return { id, title, severity, subject, subjectKind, evidence, action, items, bucket: BUCKETS[id] ?? 'note' }
     }
 
     /**
@@ -1529,6 +1569,7 @@ window.__ModuleLoader__.load({
       if (uncovered.length > 0) {
         gaps.push(gap({
           id: 'REQ',
+          items: uncovered.length,
           title: 'requirements nothing covers',
           severity: 'medium',
           subject: where,
@@ -1562,6 +1603,7 @@ window.__ModuleLoader__.load({
         const count = owing.reduce((n, entry) => n + entry.section.items.length, 0)
         gaps.push(gap({
           id: 'B1',
+          items: count,
           title: 'finished tickets that still owe work',
           severity: 'medium',
           subject: where,
@@ -1585,6 +1627,7 @@ window.__ModuleLoader__.load({
         const count = patched.reduce((n, ticket) => n + ticket.plan.openPatches, 0)
         gaps.push(gap({
           id: 'B3',
+          items: count,
           title: 'review patches never applied',
           severity: 'high',
           subject: where,
@@ -1627,6 +1670,7 @@ window.__ModuleLoader__.load({
       if (undelivered.length > 0) {
         gaps.push(gap({
           id: 'U2',
+          items: undelivered.length,
           title: 'UX components no epic delivers',
           severity: 'medium',
           subject: where,
@@ -1660,6 +1704,7 @@ window.__ModuleLoader__.load({
         const example = ignored[0]
         gaps.push(gap({
           id: 'L1',
+          items: ignored.length,
           title: 'ticket files the store cannot read',
           severity: 'high',
           subject: where,
@@ -1682,6 +1727,7 @@ window.__ModuleLoader__.load({
       if (unlisted.length > 0) {
         gaps.push(gap({
           id: 'L2',
+          items: unlisted.length,
           title: 'ticket files no index entry lists',
           severity: 'medium',
           subject: where,
@@ -1700,6 +1746,7 @@ window.__ModuleLoader__.load({
       if (orphans.length > 0) {
         gaps.push(gap({
           id: 'L3',
+          items: orphans.length,
           title: 'plans no ticket claims',
           severity: 'medium',
           subject: where,
@@ -1712,23 +1759,24 @@ window.__ModuleLoader__.load({
         }))
       }
 
-      // A status word the board does not know is shown, but never counted as
-      // settled: guessing that an unfamiliar word means finished is how a board
-      // starts lying.
+      // A status word the store does not define. This is a contradiction rather than
+      // a gap: the store's vocabulary is fixed, so a word outside it is a record the
+      // tooling cannot read, not work anyone failed to do.
       const odd = initiative.epics.flatMap((epic) =>
         epic.tickets
           .filter((ticket) => ticket.status === 'unknown')
           .map((ticket) => ({ epic, ticket })))
       if (odd.length > 0) {
-        unverifiable.push({
+        gaps.push(gap({
           id: 'L4',
-          title: 'unrecognised status words',
+          items: odd.length,
+          title: 'status words the store does not define',
+          severity: 'medium',
           subject: where,
           subjectKind: 'initiative',
-          evidence: `${odd.length} ticket(s) carry a status this board does not recognise, so they are not counted either way.`,
-          tickets: odd.map(({ ticket }) => `${ticket.ref} (${ticket.word})`),
+          evidence: `${odd.length} ticket(s) carry a status word the store does not recognise, so they are counted in no lane it defines.`,
           action: ask(`These statuses are unrecognised: ${odd.map(({ ticket }) => `${ticket.ref}=${ticket.word}`).join(', ')}. Confirm what they mean.`),
-        })
+        }))
       }
 
       // A container whose status is settled while its tickets are not is the classic
@@ -1769,6 +1817,9 @@ window.__ModuleLoader__.load({
           }))
         }
       }
+
+      const empty = detectEmptyInitiative(initiative)
+      if (empty !== null) gaps.push(empty)
 
       return { gaps, unverifiable }
     }
@@ -2412,7 +2463,8 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
      * is on screen. They are readings of the same scan, so they are views of one
      * tab rather than tabs of their own.
      */
-    const VIEWS = ['status', 'epic', 'tickets', 'initiatives'];
+    // Requirements comes second: the promise before the structure that keeps it.
+    const VIEWS = ['status', 'requirements', 'epic', 'tickets', 'initiatives'];
 
     /**
      * The dictionary key for each view's segment label. Kept as a map rather
@@ -3179,6 +3231,30 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
     }
 
     /**
+     * The one-line meta under a ticket's title.
+     *
+     * `hitl` is shown only while the ticket is unsettled: a finished ticket
+     * whose human step was performed still carries the flag, and nagging about
+     * work already done is how a board stops being believed.
+     * `blocked_reason` replaces the rest when present, because "blocked and
+     * nobody says why" is the state this line exists to prevent.
+     * @param t - the dictionary.
+     * @param ticket - one ticket from the model.
+     * @param epicName - the epic to name when the list is not inside one.
+     * @returns the line, or an empty string.
+     */
+    function metaLine(t, ticket, epicName) {
+      if (ticket.blockedReason) return t('blockedBecause', { reason: ticket.blockedReason });
+      const parts = [epicName]
+      if (ticket.assignee) parts.push(ticket.assignee)
+      if (ticket.risk) parts.push(t('riskPart', { risk: ticket.risk }))
+      if (ticket.estimate) parts.push(ticket.estimate)
+      if (ticket.after.length > 0) parts.push(t('afterPart', { refs: ticket.after.join(', ') }))
+      if (ticket.hitl && !SETTLED.has(ticket.status)) parts.push(t('hitlPart'))
+      return parts.filter(Boolean).join(' -- ')
+    }
+
+    /**
      * One ticket as a card: its reference, title, status, and -- where the list
      * is not already inside an epic -- the epic it belongs to.
      * @param props - the ticket, the opener, and whether to name its epic.
@@ -3195,12 +3271,54 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           tone: statusTone(ticket.status),
           title: t('ticketStatus'),
         },
-        note: showEpic === true ? ticket.epicTitle : '',
+        // Everything the store already records about this ticket that a
+        // reader would otherwise open the file to find. One line, joined,
+        // so the card stays a card.
+        note: metaLine(t, ticket, showEpic === true ? ticket.epicTitle : ''),
         // The plan is what a build writes; before that the leaf is the
         // ticket, so whichever exists is the file worth opening.
         onOpen: makeOpener(ticket.plan?.path ?? ticket.leaf?.path ?? null),
         openLabel: t('openPlan'),
       });
+    }
+
+    /**
+     * View 2: every requirement the initiative declared, and what claims it.
+     *
+     * The status view's coverage line says how many; this says which. It is a tab
+     * rather than a panel because a reader who does not need the requirement map
+     * should not have to scroll past it, and one who does wants all of it.
+     * @param props - the dictionary and the selected initiative.
+     * @returns the view element.
+     */
+    function RequirementsView({ t, initiative }) {
+      const requirements = initiative.requirements ?? [];
+      if (requirements.length === 0) {
+        return h('div', { className: 'bmad-sb-note' }, t('noRequirements'));
+      }
+
+      const coverage = coverageOf(initiative);
+      return h(
+        'div',
+        { className: 'bmad-sb-cards' },
+        requirements.map((requirement) => {
+          const covering = coverage.get(requirement.id) ?? [];
+          const state = coverageState(covering);
+          const names = covering.map((entry) => entry.ref);
+          return h(Card, {
+            key: requirement.id,
+            id: requirement.id,
+            title: requirement.text,
+            tag: t(`coverage.${state}`),
+            tagTone: state === 'covered' ? 'success' : state === 'partial' ? 'warning' : 'error',
+            note:
+              names.length === 0
+                ? t('nothingCovers')
+                : t('coveredBy', { refs: names.join(', ') }),
+            footer: requirement.source === '' ? undefined : requirement.source,
+          });
+        }),
+      );
     }
 
     /**
@@ -3280,20 +3398,51 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
             );
 
       const detected = detectInitiative(initiative);
-      const empty = detectEmptyInitiative(initiative);
-      const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
-      const findings = [
-        deferredLane,
-        gaps.length === 0
-          ? null
-          : h(CardLane, {
-              key: 'gaps',
-              label: t('gapsLabel'),
-              token: WARN_TOKEN,
-              cards: gapCards(t, gaps),
-              collapsed: isFolded(folded, 'gaps', false),
-              onToggle: foldHandler(onFlip, 'gaps', false),
-            }),
+      const unfinished = detected.gaps.filter((g) => g.bucket === 'unfinished');
+      const contradictions = detected.gaps.filter((g) => g.bucket === 'contradiction');
+      const notes = detected.gaps.filter((g) => g.bucket === 'note');
+      const total = (list) => list.reduce((n, g) => n + g.items, 0);
+      // Two numbers, two meanings, never blended. Each equals the items its
+      // lane lists below, so a reader can count them and get the same answer.
+      const signal = h('div', { className: 'bmad-sb-signal' },
+        h('span', { className: 'bmad-sb-signalitem' },
+          h('span', { className: 'bmad-sb-signalnum' }, String(total(unfinished))),
+          h('span', { className: 'bmad-sb-signallabel' }, t('unfinishedLabel')),
+        ),
+        h('span', { className: 'bmad-sb-signalitem' },
+          h('span', { className: 'bmad-sb-signalnum' }, String(total(contradictions))),
+          h('span', { className: 'bmad-sb-signallabel' }, t('contradictionLabel')),
+        ),
+      );
+
+        // E1 is reported by the detectors now, so the footnote can count it with L1
+        // instead of it being folded into the findings above.
+        const findings = [
+          deferredLane,
+          unfinished.length + contradictions.length === 0
+            ? null
+            : h(CardLane, {
+                key: 'gaps',
+                label: t('gapsLabel'),
+                token: WARN_TOKEN,
+                cards: gapCards(t, [...unfinished, ...contradictions]),
+                count: String(total(unfinished) + total(contradictions)),
+                collapsed: isFolded(folded, 'gaps', false),
+                onToggle: foldHandler(onFlip, 'gaps', false),
+              }),
+          // Facts rather than debts: shown once, with a count, and never added to
+          // either number above. Visible so nothing is hidden; quiet so a file that
+          // was already like that stops shouting.
+          notes.length === 0
+            ? null
+            : h(
+                'div',
+                { className: 'bmad-sb-note bmad-sb-footnote' },
+                t('footnote', {
+                  files: total(notes.filter((gap) => gap.id === 'L1')),
+                  empty: total(notes.filter((gap) => gap.id === 'E1')),
+                }),
+              ),
         detected.unverifiable.length === 0
           ? null
           : h(CardLane, {
@@ -3312,6 +3461,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         null,
         nextLine,
         coverageLine,
+        signal,
         lanes.length === 0 ? h('div', { className: 'bmad-sb-note' }, t('noTickets')) : lanes,
         unreadable > 0
           ? h(
@@ -3598,41 +3748,43 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       };
       const unreadable = board.unreadable.length + (selected.unreadable ?? 0);
 
-      const body =
-        shown === 'initiatives'
-          ? h(InitiativesView, {
-              t,
-              initiatives: board.initiatives,
-              activeSlug: board.config.activeInitiative,
-              selectedSlug: picked === null ? null : picked.slug,
-              onSelect: pick,
-            folded,
-            onFlip: setFolded,
-            })
-          : shown === 'epic'
-            ? h(EpicView, {
+        const body =
+          shown === 'initiatives'
+            ? h(InitiativesView, {
                 t,
-                initiative: selected,
+                initiatives: board.initiatives,
+                activeSlug: board.config.activeInitiative,
+                selectedSlug: picked === null ? null : picked.slug,
+                onSelect: pick,
                 folded,
                 onFlip: setFolded,
-                makeOpener,
               })
-            : shown === 'tickets'
-              ? h(TicketsView, {
-                  t,
-                  initiative: selected,
-                  folded,
-                  onFlip: setFolded,
-                  makeOpener,
-                })
-              : h(StatusView, {
-                  t,
-                  initiative: selected,
-                  unreadable,
-                  folded,
-                  onFlip: setFolded,
-                  makeOpener,
-                });
+            : shown === 'requirements'
+              ? h(RequirementsView, { t, initiative: selected })
+              : shown === 'epic'
+                ? h(EpicView, {
+                    t,
+                    initiative: selected,
+                    folded,
+                    onFlip: setFolded,
+                    makeOpener,
+                  })
+                : shown === 'tickets'
+                  ? h(TicketsView, {
+                      t,
+                      initiative: selected,
+                      folded,
+                      onFlip: setFolded,
+                      makeOpener,
+                    })
+                  : h(StatusView, {
+                      t,
+                      initiative: selected,
+                      unreadable,
+                      folded,
+                      onFlip: setFolded,
+                      makeOpener,
+                    });
 
       return h(BoardShell, {
         header: h(BoardHeader, {
@@ -3711,6 +3863,20 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'deferredPrompt': 'Pick up this deferred item from {source}: {item}',
       'initiativeEmpty': 'nothing sliced into epics yet',
       'gapsLabel': 'Gaps',
+      'viewRequirements': 'Requirements',
+      'noRequirements': 'This initiative declares no requirements.',
+      'nothingCovers': 'nothing covers this requirement',
+      'coveredBy': 'covered by {refs}',
+      'coverage.covered': 'covered',
+      'coverage.partial': 'partial',
+      'coverage.uncovered': 'uncovered',
+      'unfinishedLabel': 'Unfinished',
+      'contradictionLabel': 'Does not add up',
+      'footnote': '{files} unclassified file(s), {empty} empty initiative(s)',
+      'blockedBecause': 'blocked -- {reason}',
+      'riskPart': 'risk {risk}',
+      'afterPart': 'after {refs}',
+      'hitlPart': 'needs a human step',
       'unverLabel': 'Could not check',
       'askAnAgent': 'Ask an agent',
       'askAgentPill': 'Ask agent - prompt',
@@ -3787,6 +3953,20 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'deferredPrompt': '\u63a5\u624b\u6765\u81ea {source} \u7684\u5ef6\u671f\u9879\uff1a{item}',
             'initiativeEmpty': '\u5c1a\u672a\u5207\u5206\u4e3a\u4efb\u52a1\u5305',
       'gapsLabel': '\u5dee\u8ddd',
+      'viewRequirements': '\u9700\u6c42',
+      'noRequirements': '\u6b64\u5021\u8bae\u672a\u58f0\u660e\u4efb\u4f55\u9700\u6c42\u3002',
+      'nothingCovers': '\u6ca1\u6709\u4efb\u4f55\u4efb\u52a1\u5305\u8986\u76d6\u6b64\u9700\u6c42',
+      'coveredBy': '\u7531 {refs} \u8986\u76d6',
+      'coverage.covered': '\u5df2\u8986\u76d6',
+      'coverage.partial': '\u90e8\u5206\u8986\u76d6',
+      'coverage.uncovered': '\u672a\u8986\u76d6',
+      'unfinishedLabel': '\u672a\u5b8c\u6210',
+      'contradictionLabel': '\u5bf9\u4e0d\u4e0a',
+      'footnote': '{files} \u4e2a\u672a\u5206\u7c7b\u6587\u4ef6\uff0c{empty} \u4e2a\u7a7a\u5021\u8bae',
+      'blockedBecause': '\u963b\u585e -- {reason}',
+      'riskPart': '\u98ce\u9669 {risk}',
+      'afterPart': '\u4f9d\u8d56 {refs}',
+      'hitlPart': '\u9700\u8981\u4eba\u5de5\u6b65\u9aa4',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
       'askAnAgent': '\u8be2\u95ee\u667a\u80fd\u4f53',
       'askAgentPill': '\u8be2\u95ee\u667a\u80fd\u4f53 - \u63d0\u793a\u8bcd',
