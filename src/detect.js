@@ -133,6 +133,49 @@ export function detectInitiative(initiative) {
     }))
   }
 
+
+  // A UX run nothing downstream cites is a document nobody reads: the design was
+  // produced and then not built on. The plan is the collection of tickets here,
+  // so a run the tickets never name has not been carried forward.
+  if (initiative.ux !== null && initiative.ux !== undefined && !initiative.ux.claimed) {
+    gaps.push(gap({
+      id: 'U1',
+      title: 'UX run not carried into the plan',
+      severity: 'medium',
+      subject: initiative.ux.run,
+      subjectKind: 'area',
+      evidence: 'the UX design run exists, and no ticket or epic names any part of it.',
+      action: ask(
+        `The UX design run ${initiative.ux.run} exists, and nothing in ${where}'s ticket store `
+        + 'cites it. Tell me whether its decisions are already covered elsewhere, whether it '
+        + 'should feed the plan, or whether it is superseded and can be retired.',
+      ),
+    }))
+  }
+
+  // A component the design asks for and no epic delivers. The join is the shared
+  // vocabulary: the design names it and the plan that builds it names the same
+  // words. A pattern the design itself marked deferred is not a failure.
+  const undelivered = (initiative.ux?.components ?? [])
+    .filter((component) => !component.deferred && component.deliveredBy.length === 0)
+  if (undelivered.length > 0) {
+    gaps.push(gap({
+      id: 'U2',
+      title: 'UX components no epic delivers',
+      severity: 'medium',
+      subject: where,
+      subjectKind: 'initiative',
+      evidence:
+        `${undelivered.length} component pattern(s) in ${initiative.ux.run} are named by no epic `
+        + 'or ticket, so nothing in the plan builds them.',
+      action: ask(
+        `In ${where}, these UX component patterns are named nowhere in the plan: `
+        + `${undelivered.map((component) => component.name).join(', ')}. Either plan them into an `
+        + 'epic, or record in EXPERIENCE.md that they are deferred or dropped.',
+      ),
+    }))
+  }
+
   // An epic nobody has sliced yet is why the lanes below it are empty, so it is
   // the first thing the board says rather than the last.
   for (const epic of initiative.epics) {

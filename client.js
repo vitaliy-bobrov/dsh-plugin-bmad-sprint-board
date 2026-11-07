@@ -945,6 +945,130 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * UX evidence: whether the design runs and their component patterns are tied to
+     * work that can deliver them.
+     *
+     * v7 keeps a UX run in a `ux-<slug>` folder beside the initiative, holding
+     * `DESIGN.md` and `EXPERIENCE.md`. `EXPERIENCE.md` carries a `## Component
+     * Patterns` section with one `### <component>` per pattern, and that is the UX
+     * requirement list: the components the design says the product has.
+     *
+     * Both halves can come adrift. A run nothing downstream cites is a document
+     * nobody reads, and a component no ticket names is one nothing can close. Neither
+     * appears anywhere else, because the requirement coverage map is over `R` ids
+     * and UX components have none.
+     *
+     * Unlike v6 this does not guess from PascalCase identifiers: v7 names components
+     * in prose ("Reserve Button (PDP)"), so the match is on the words, in order.
+     *
+     * @module dsh-plugin-bmad-sprint-board/ux
+     */
+
+    /** The prefix every UX run folder carries. */
+    const UX_PREFIX = 'ux-'
+
+    /** The section that lists the patterns. */
+    const UX_PATTERNS = /^##[ \t]+Component Patterns[ \t]*$/
+    /** One pattern. */
+    const UX_PATTERN = /^###[ \t]+(.+?)[ \t]*$/
+    /** Any other level-two heading ends the section. */
+    const UX_OTHER_SECTION = /^##[ \t]+/
+    /** A parenthetical or emphasis note beside a name. */
+    const UX_NOTE = /[\uFF08(].*?[)\uFF09]|\*\(.*?\)\*|\*.*?\*/g
+
+    /**
+     * Normalise a component name or a phrase for matching.
+     *
+     * @param {string} text - the raw name or text.
+     * @returns {string} lowercased, punctuation collapsed to single spaces.
+     */
+    function normalise(text) {
+      return String(text)
+        .replace(UX_NOTE, ' ')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    }
+
+    /**
+     * The UX run's folder name, if the initiative has one.
+     *
+     * @param {Array<{name: string, type: string}>} entries - the initiative folder's listing.
+     * @returns {string|null} the folder name, or null when there is no run.
+     */
+    function parseUxRun(entries) {
+      const runs = (entries ?? [])
+        .filter((entry) => entry.type === 'directory' && entry.name.startsWith(UX_PREFIX))
+        .map((entry) => entry.name)
+        .sort()
+      return runs.length === 0 ? null : runs[runs.length - 1]
+    }
+
+    /**
+     * The component patterns a UX run asks for.
+     *
+     * A heading that says it is deferred is kept but marked, because a component the
+     * design itself postponed is not a component the plan failed to deliver.
+     *
+     * @param {string|null} experience - the contents of `EXPERIENCE.md`.
+     * @returns {Array<{name: string, deferred: boolean}>} the patterns, in file order.
+     */
+    function parseComponentPatterns(experience) {
+      if (typeof experience !== 'string') return []
+
+      const patterns = []
+      let inside = false
+      for (const line of String(experience).split('\n')) {
+        if (UX_PATTERNS.test(line)) {
+          inside = true
+          continue
+        }
+        if (!inside) continue
+        if (UX_OTHER_SECTION.test(line)) {
+          inside = false
+          continue
+        }
+        const heading = UX_PATTERN.exec(line)
+        if (heading === null) continue
+        const raw = heading[1]
+        patterns.push({
+          name: raw.replace(UX_NOTE, ' ').replace(/\s+/g, ' ').trim(),
+          deferred: /deferred/i.test(raw),
+        })
+      }
+      return patterns
+    }
+
+    /**
+     * Which tickets name a component.
+     *
+     * The join is the shared vocabulary, as in v6: the design names a component and
+     * the plan that builds it names the same words. Matching is on the normalised
+     * name, so punctuation and case do not matter, but a one-word name is required to
+     * appear as a word rather than inside a longer one.
+     *
+     * @param {string} name - the component's name.
+     * @param {Array<{ref: string, text: string}>} tickets - each ticket's reference and the text it carries.
+     * @returns {string[]} the refs that name it.
+     */
+    function deliveredBy(name, tickets) {
+      const wanted = normalise(name)
+      if (wanted === '') return []
+      // The design writes "Reservation Card" and the code writes `ReservationCard`;
+      // the design writes "Dashboard Reservations Zone" and the plan may write
+      // "dashboard-reservations-zone". Comparing with spaces removed catches all
+      // three, and a multi-word name is specific enough that it does not over-match.
+      const tight = wanted.replace(/ /g, '')
+      return tickets
+        .filter((ticket) => {
+          const text = normalise(ticket.text)
+          return text.includes(wanted) || text.replace(/ /g, '').includes(tight)
+        })
+        .map((ticket) => ticket.ref)
+    }
+
+    /**
      * The board model: one BMAD v7 project, read into initiatives, epics and tickets.
      *
      * The model is built from text alone -- it never touches the file system, so it
@@ -956,6 +1080,7 @@ window.__ModuleLoader__.load({
      *
      * @module dsh-plugin-bmad-sprint-board/model
      */
+
 
 
 
@@ -1118,7 +1243,7 @@ window.__ModuleLoader__.load({
      * @param {number} input.unreadable - how many files could not be read.
      * @returns {object} the initiative model.
      */
-    function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable = 0 }) {
+    function buildInitiative({ slug, dir, ticket, deferred, ux, epics, unreadable = 0 }) {
       const own = readInitiativeTicket(ticket)
       const ledger = parseDeferred(deferred)
       const requirements = parseRequirements(ticket)
@@ -1130,6 +1255,7 @@ window.__ModuleLoader__.load({
         // a leaf carries a ticket, a file with a `ticket` key is a plan over one,
         // and anything else is ignored. Splitting on the file name instead is what
         // made a folder of `*-plan.md` files invisible.
+        const textByPath = new Map((epic.files ?? []).map((file) => [file.path, file.text]))
         const leaves = []
         const plans = []
         const ignored = []
@@ -1169,6 +1295,14 @@ window.__ModuleLoader__.load({
 
         const tickets = entries.map(build)
 
+        // What each ticket actually says, for matching the design's words against.
+        for (const ticket of tickets) {
+          ticket.text = [ticket.leaf?.path, ticket.plan?.path]
+            .filter((path) => path !== undefined && path !== null)
+            .map((path) => textByPath.get(path) ?? '')
+            .join('\n')
+        }
+
         // A leaf the index does not list is still a ticket the store knows about.
         for (const leaf of leaves) {
           if (usedLeaves.has(leaf.path) || leaf.id === null) continue
@@ -1195,6 +1329,10 @@ window.__ModuleLoader__.load({
         return {
           id: epic.id,
           slug: epic.slug,
+          // Everything the epic folder says, which is what the design's vocabulary is
+          // matched against. Matching per ticket would miss a plan the store does not
+          // link, and the question U2 asks is which epic delivers a component anyway.
+          corpus: [epic.ticket ?? '', ...(epic.files ?? []).map((file) => file.text)].join('\n'),
           folder: epic.folder,
           covers: epic.covers ?? [],
           title: header.title ?? epic.title ?? epic.slug,
@@ -1221,9 +1359,27 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const components = parseComponentPatterns(ux?.experience ?? null).map((pattern) => ({
+        ...pattern,
+        deliveredBy: pattern.deferred
+          ? []
+          : built.filter((epic) => deliveredBy(pattern.name, [{ ref: epic.slug, text: epic.corpus }]).length > 0)
+            .map((epic) => epic.slug),
+      }))
+      const corpus = [ticket ?? '', ...built.flatMap((epic) => [epic.rawTicket, ...epic.tickets.map((t) => t.text)])].join('\n')
+
       return {
         slug,
         dir,
+        ux: ux?.run === null || ux?.run === undefined
+          ? null
+          : {
+              run: ux.run,
+              // The run is carried when the plan names the folder: the epics document
+              // that turns design into work is the initiative's own tickets here.
+              claimed: corpus.includes(ux.run),
+              components,
+            },
         title: own.title ?? humanise(slug),
         status: containerState(own.status, built.map((epic) => epic.status)),
         rawStatus: own.status,
@@ -1443,6 +1599,49 @@ window.__ModuleLoader__.load({
         }))
       }
 
+
+      // A UX run nothing downstream cites is a document nobody reads: the design was
+      // produced and then not built on. The plan is the collection of tickets here,
+      // so a run the tickets never name has not been carried forward.
+      if (initiative.ux !== null && initiative.ux !== undefined && !initiative.ux.claimed) {
+        gaps.push(gap({
+          id: 'U1',
+          title: 'UX run not carried into the plan',
+          severity: 'medium',
+          subject: initiative.ux.run,
+          subjectKind: 'area',
+          evidence: 'the UX design run exists, and no ticket or epic names any part of it.',
+          action: ask(
+            `The UX design run ${initiative.ux.run} exists, and nothing in ${where}'s ticket store `
+            + 'cites it. Tell me whether its decisions are already covered elsewhere, whether it '
+            + 'should feed the plan, or whether it is superseded and can be retired.',
+          ),
+        }))
+      }
+
+      // A component the design asks for and no epic delivers. The join is the shared
+      // vocabulary: the design names it and the plan that builds it names the same
+      // words. A pattern the design itself marked deferred is not a failure.
+      const undelivered = (initiative.ux?.components ?? [])
+        .filter((component) => !component.deferred && component.deliveredBy.length === 0)
+      if (undelivered.length > 0) {
+        gaps.push(gap({
+          id: 'U2',
+          title: 'UX components no epic delivers',
+          severity: 'medium',
+          subject: where,
+          subjectKind: 'initiative',
+          evidence:
+            `${undelivered.length} component pattern(s) in ${initiative.ux.run} are named by no epic `
+            + 'or ticket, so nothing in the plan builds them.',
+          action: ask(
+            `In ${where}, these UX component patterns are named nowhere in the plan: `
+            + `${undelivered.map((component) => component.name).join(', ')}. Either plan them into an `
+            + 'epic, or record in EXPERIENCE.md that they are deferred or dropped.',
+          ),
+        }))
+      }
+
       // An epic nobody has sliced yet is why the lanes below it are empty, so it is
       // the first thing the board says rather than the last.
       for (const epic of initiative.epics) {
@@ -1646,6 +1845,7 @@ window.__ModuleLoader__.load({
 
 
 
+
     /** How many reads the scan keeps in flight; the same figure the shell used. */
     const READ_CONCURRENCY = 8
 
@@ -1780,11 +1980,19 @@ window.__ModuleLoader__.load({
       const slug = name.slice(INITIATIVE_PREFIX.length)
       const before = unreadable.length
 
-      const [ticket, indexText, deferred] = await Promise.all([
+      const [ticket, indexText, deferred, listing] = await Promise.all([
         tryRead(io, join(dir, `${name}.md`), signal),
         tryRead(io, join(join(dir, 'tickets'), 'tickets.toml'), signal),
         tryRead(io, join(dir, 'deferred-work.md'), signal),
+        tryList(io, dir, signal),
       ])
+
+      // The UX run is a folder beside the initiative ticket, and its EXPERIENCE.md
+      // carries the component patterns the design asks for.
+      const uxRun = parseUxRun(listing)
+      const experience = uxRun === null
+        ? null
+        : await tryRead(io, join(join(dir, uxRun), 'EXPERIENCE.md'), signal)
 
       const rows = readEpicIndex(indexText)
       const epics = await mapLimit(rows, READ_CONCURRENCY, (row) =>
@@ -1795,6 +2003,7 @@ window.__ModuleLoader__.load({
         dir,
         ticket,
         deferred,
+        ux: { run: uxRun, experience },
         epics,
         unreadable: unreadable.length - before,
       })

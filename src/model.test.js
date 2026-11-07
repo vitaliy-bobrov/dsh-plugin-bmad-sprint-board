@@ -472,3 +472,80 @@ test('B1 fires when a deferred item came from a settled ticket', () => {
   assert.ok(b1, 'B1 fired')
   assert.match(b1.evidence, /1 deferred item/)
 })
+
+test('U1 fires when nothing in the plan names the UX run', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\nstatus: 'in-progress'\n---\n",
+    ux: { run: 'ux-the-run', experience: '## Component Patterns\n\n### Reserve Button\n' },
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'in-progress'\n---\n",
+      storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+    }],
+  })
+  assert.equal(model.ux.claimed, false, 'nothing cites the run')
+  const u1 = detectInitiative(model).gaps.find((g) => g.id === 'U1')
+  assert.ok(u1, 'U1 fired')
+  assert.equal(u1.subject, 'ux-the-run')
+})
+
+test('U1 stays quiet once the plan names the run', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\nstatus: 'in-progress'\n---\n\n"
+      + '- design - `ux-the-run/DESIGN.md`\n',
+    ux: { run: 'ux-the-run', experience: '## Component Patterns\n\n### Reserve Button\n' },
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'in-progress'\n---\n",
+      storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+    }],
+  })
+  assert.equal(model.ux.claimed, true)
+  assert.equal(detectInitiative(model).gaps.filter((g) => g.id === 'U1').length, 0)
+})
+
+test('U2 fires for a component no epic delivers, and not for a deferred one', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\nstatus: 'in-progress'\n---\n\nSee `ux-run`.\n",
+    ux: {
+      run: 'ux-run',
+      experience: '## Component Patterns\n\n### Reserve Button\n\n### Loyalty Tracker *(Deferred to Phase 3)*\n',
+    },
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'in-progress'\n---\n",
+      storyIndex: storyIndex(1),
+      files: [
+        leaf(1, 'done'),
+        {
+          path: `${DIR}/story-ticket-1-plan.md`,
+          text: "---\ntype: feature\nticket: '1'\nstatus: 'done'\n---\nBuilds the ReserveButton.\n",
+        },
+      ],
+    }],
+  })
+  const components = model.ux.components
+  assert.equal(components.find((c) => c.name === 'Reserve Button').deliveredBy.length, 1)
+  assert.equal(components.find((c) => c.name === 'Loyalty Tracker').deliveredBy.length, 0)
+  // only the non-deferred one is a finding
+  assert.equal(detectInitiative(model).gaps.filter((g) => g.id === 'U2').length, 0)
+})
+
+test('U2 reports the components nothing names', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\nstatus: 'in-progress'\n---\n\nSee `ux-run`.\n",
+    ux: { run: 'ux-run', experience: '## Component Patterns\n\n### Mystery Placeholder\n' },
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      ticket: "---\ntype: epic\ntitle: 'A'\nstatus: 'in-progress'\n---\n",
+      storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+    }],
+  })
+  const u2 = detectInitiative(model).gaps.find((g) => g.id === 'U2')
+  assert.ok(u2, 'U2 fired')
+  assert.match(u2.evidence, /1 component pattern/)
+})

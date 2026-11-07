@@ -16,6 +16,7 @@
 import { CONFIG_LAYERS, detectedVersion, resolveConfig } from './config.js'
 import { buildInitiative } from './model.js'
 import { readEpicIndex } from './store.js'
+import { parseUxRun } from './ux.js'
 
 /** How many reads the scan keeps in flight; the same figure the shell used. */
 export const READ_CONCURRENCY = 8
@@ -151,11 +152,19 @@ async function readInitiative(io, outputFolder, name, signal, unreadable) {
   const slug = name.slice(INITIATIVE_PREFIX.length)
   const before = unreadable.length
 
-  const [ticket, indexText, deferred] = await Promise.all([
+  const [ticket, indexText, deferred, listing] = await Promise.all([
     tryRead(io, join(dir, `${name}.md`), signal),
     tryRead(io, join(join(dir, 'tickets'), 'tickets.toml'), signal),
     tryRead(io, join(dir, 'deferred-work.md'), signal),
+    tryList(io, dir, signal),
   ])
+
+  // The UX run is a folder beside the initiative ticket, and its EXPERIENCE.md
+  // carries the component patterns the design asks for.
+  const uxRun = parseUxRun(listing)
+  const experience = uxRun === null
+    ? null
+    : await tryRead(io, join(join(dir, uxRun), 'EXPERIENCE.md'), signal)
 
   const rows = readEpicIndex(indexText)
   const epics = await mapLimit(rows, READ_CONCURRENCY, (row) =>
@@ -166,6 +175,7 @@ async function readInitiative(io, outputFolder, name, signal, unreadable) {
     dir,
     ticket,
     deferred,
+    ux: { run: uxRun, experience },
     epics,
     unreadable: unreadable.length - before,
   })

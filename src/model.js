@@ -14,6 +14,7 @@
 import { readFrontmatter, stringOf } from './frontmatter.js'
 import { parseDeferred } from './deferred.js'
 import { parseRequirements } from './requirements.js'
+import { deliveredBy, parseComponentPatterns } from './ux.js'
 import { classify, readLeaf, readPlan, readStoryIndex, slugify } from './store.js'
 
 /**
@@ -172,7 +173,7 @@ export function ticketStatus(plan, leaf) {
  * @param {number} input.unreadable - how many files could not be read.
  * @returns {object} the initiative model.
  */
-export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable = 0 }) {
+export function buildInitiative({ slug, dir, ticket, deferred, ux, epics, unreadable = 0 }) {
   const own = readInitiativeTicket(ticket)
   const ledger = parseDeferred(deferred)
   const requirements = parseRequirements(ticket)
@@ -184,6 +185,7 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
     // a leaf carries a ticket, a file with a `ticket` key is a plan over one,
     // and anything else is ignored. Splitting on the file name instead is what
     // made a folder of `*-plan.md` files invisible.
+    const textByPath = new Map((epic.files ?? []).map((file) => [file.path, file.text]))
     const leaves = []
     const plans = []
     const ignored = []
@@ -223,6 +225,14 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
 
     const tickets = entries.map(build)
 
+    // What each ticket actually says, for matching the design's words against.
+    for (const ticket of tickets) {
+      ticket.text = [ticket.leaf?.path, ticket.plan?.path]
+        .filter((path) => path !== undefined && path !== null)
+        .map((path) => textByPath.get(path) ?? '')
+        .join('\n')
+    }
+
     // A leaf the index does not list is still a ticket the store knows about.
     for (const leaf of leaves) {
       if (usedLeaves.has(leaf.path) || leaf.id === null) continue
@@ -249,6 +259,10 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
     return {
       id: epic.id,
       slug: epic.slug,
+      // Everything the epic folder says, which is what the design's vocabulary is
+      // matched against. Matching per ticket would miss a plan the store does not
+      // link, and the question U2 asks is which epic delivers a component anyway.
+      corpus: [epic.ticket ?? '', ...(epic.files ?? []).map((file) => file.text)].join('\n'),
       folder: epic.folder,
       covers: epic.covers ?? [],
       title: header.title ?? epic.title ?? epic.slug,
@@ -275,9 +289,27 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
     }
   }
 
+  const components = parseComponentPatterns(ux?.experience ?? null).map((pattern) => ({
+    ...pattern,
+    deliveredBy: pattern.deferred
+      ? []
+      : built.filter((epic) => deliveredBy(pattern.name, [{ ref: epic.slug, text: epic.corpus }]).length > 0)
+        .map((epic) => epic.slug),
+  }))
+  const corpus = [ticket ?? '', ...built.flatMap((epic) => [epic.rawTicket, ...epic.tickets.map((t) => t.text)])].join('\n')
+
   return {
     slug,
     dir,
+    ux: ux?.run === null || ux?.run === undefined
+      ? null
+      : {
+          run: ux.run,
+          // The run is carried when the plan names the folder: the epics document
+          // that turns design into work is the initiative's own tickets here.
+          claimed: corpus.includes(ux.run),
+          components,
+        },
     title: own.title ?? humanise(slug),
     status: containerState(own.status, built.map((epic) => epic.status)),
     rawStatus: own.status,
