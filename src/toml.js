@@ -73,7 +73,47 @@ function decode(raw) {
 
   if (/^[+-]?\d+$/.test(text)) return Number.parseInt(text, 10)
   if (/^[+-]?\d*\.\d+$/.test(text)) return Number.parseFloat(text)
+  if (text.startsWith('[') && text.endsWith(']')) return decodeArray(text)
   return undefined
+}
+
+/**
+ * Decode a one-line array of scalars.
+ *
+ * BMAD uses these for dependency lists (`after = ["1.1", "2.3"]`) and coverage
+ * lists (`covers = ["R1", "R5"]`), so a reader that skipped them would lose the
+ * only record of what a ticket waits for. Nested arrays and inline tables are
+ * not used for either and are left unreadable.
+ *
+ * @param {string} text - the array literal, brackets included.
+ * @returns {Array<*>|undefined} the items, or undefined when any cannot be read.
+ */
+function decodeArray(text) {
+  const inner = text.slice(1, -1).trim()
+  if (inner === '') return []
+  const items = []
+  let depth = 0
+  let quote = ''
+  let start = 0
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i]
+    if (quote !== '') {
+      if (ch === '\\' && quote === '"') i += 1
+      else if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === '"' || ch === "'") quote = ch
+    else if (ch === '[' || ch === '{') depth += 1
+    else if (ch === ']' || ch === '}') depth -= 1
+    else if (ch === ',' && depth === 0) {
+      items.push(inner.slice(start, i))
+      start = i + 1
+    }
+  }
+  items.push(inner.slice(start))
+
+  const decoded = items.map((item) => decode(item.trim()))
+  return decoded.some((item) => item === undefined) ? undefined : decoded
 }
 
 /**

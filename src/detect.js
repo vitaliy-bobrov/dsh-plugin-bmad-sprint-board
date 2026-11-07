@@ -52,6 +52,13 @@ export function detectInitiative(initiative) {
   const unverifiable = []
   const where = initiative.slug
 
+  // An epic nobody has sliced yet is why the lanes below it are empty, so it is
+  // the first thing the board says rather than the last.
+  for (const epic of initiative.epics) {
+    const unsliced = detectUnslicedEpic(epic)
+    if (unsliced !== null) gaps.push(unsliced)
+  }
+
   // A ticket file the store cannot classify is invisible to `tickets.py`. The
   // store tells leaves from plans by frontmatter type, so a `*-plan.md` whose
   // type is not `story`/`spike`/`bug` and which names no ticket is neither --
@@ -174,6 +181,37 @@ export function detectInitiative(initiative) {
   }
 
   return { gaps, unverifiable }
+}
+
+/**
+ * An epic with no tickets under it.
+ *
+ * The store slices an initiative into epics and an epic into stories, so an epic
+ * with an empty ticket folder has not been planned yet -- and nothing can start
+ * until it is. This is the finding that explains an otherwise silent board: every
+ * lane is empty because the work has not been written down.
+ *
+ * The action names the Product Owner because planning an epic is Sofia's job, not
+ * the builder's: `slice.md` has her refine the epic and write all its stories
+ * before any of them can be worked.
+ *
+ * @param {object} epic - one epic from the model.
+ * @returns {object|null} the gap, or null when the epic holds tickets.
+ */
+export function detectUnslicedEpic(epic) {
+  if (epic.tickets.length > 0) return null
+  return gap({
+    id: 'E2',
+    title: 'epic has no stories',
+    severity: 'medium',
+    subject: epic.slug,
+    subjectKind: 'epic',
+    evidence: 'the epic exists and its ticket store lists no stories, so nothing in it can start.',
+    action: ask(
+      `/bmad-agent-po Plan epic ${epic.slug} ("${epic.title}"). Its ticket store lists no `
+      + 'stories yet: refine it, then write its stories so the work can be started.',
+    ),
+  })
 }
 
 /**

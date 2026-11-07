@@ -59,10 +59,18 @@ test('a trailing comment is dropped', () => {
 })
 
 test('a value it cannot read is omitted, never guessed', () => {
-  const doc = parseToml('[core]\nlist = [1, 2, 3]\ntable = { a = 1 }\nreal = "kept"\n')
-  assert.equal(pick(doc, 'core.list'), undefined)
+  const doc = parseToml('[core]\ntable = { a = 1 }\nreal = "kept"\n')
   assert.equal(pick(doc, 'core.table'), undefined)
   assert.equal(pick(doc, 'core.real'), 'kept')
+})
+
+test('reads the one-line arrays BMAD uses for dependencies and coverage', () => {
+  // `after = ["1.1", "2.3"]` is the only record of what a ticket waits for, so
+  // a reader that skipped arrays would silently lose every dependency.
+  const doc = parseToml('[e]\nafter = ["1.1", "2.3"]\ncovers = ["R1", "R5"]\nnone = []\n')
+  assert.deepEqual(pick(doc, 'e.after'), ['1.1', '2.3'])
+  assert.deepEqual(pick(doc, 'e.covers'), ['R1', 'R5'])
+  assert.deepEqual(pick(doc, 'e.none'), [])
 })
 
 test('later layers win for scalars, tables deep-merge', () => {

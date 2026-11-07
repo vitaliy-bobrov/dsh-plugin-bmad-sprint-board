@@ -59,7 +59,12 @@ export function readEpicIndex(text) {
   const rows = Array.isArray(doc.epic) ? doc.epic : []
   return rows
     .filter((row) => typeof row.slug === 'string' && row.slug !== '')
-    .map((row) => ({ id: row.id ?? null, slug: row.slug, title: row.title ?? '' }))
+    .map((row) => ({
+      id: row.id ?? null,
+      slug: row.slug,
+      title: row.title ?? '',
+      after: Array.isArray(row.after) ? row.after.map(String) : [],
+    }))
 }
 
 /**
@@ -77,6 +82,12 @@ export function readStoryIndex(text) {
     type: typeof row.type === 'string' ? row.type : 'story',
     title: typeof row.title === 'string' ? row.title : '',
     v6Key: typeof row.v6_key === 'string' ? row.v6_key : null,
+    // what this ticket waits for, in `<epic id>.<entry id>` refs
+    after: Array.isArray(row.after) ? row.after.map(String) : [],
+    covers: Array.isArray(row.covers) ? row.covers.map(String) : [],
+    hitl: row.hitl === true,
+    // a ticket the store still has to settle before it can be started
+    refine: row.refine === true,
   }))
 }
 

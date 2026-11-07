@@ -156,7 +156,47 @@ window.__ModuleLoader__.load({
 
       if (/^[+-]?\d+$/.test(text)) return Number.parseInt(text, 10)
       if (/^[+-]?\d*\.\d+$/.test(text)) return Number.parseFloat(text)
+      if (text.startsWith('[') && text.endsWith(']')) return decodeArray(text)
       return undefined
+    }
+
+    /**
+     * Decode a one-line array of scalars.
+     *
+     * BMAD uses these for dependency lists (`after = ["1.1", "2.3"]`) and coverage
+     * lists (`covers = ["R1", "R5"]`), so a reader that skipped them would lose the
+     * only record of what a ticket waits for. Nested arrays and inline tables are
+     * not used for either and are left unreadable.
+     *
+     * @param {string} text - the array literal, brackets included.
+     * @returns {Array<*>|undefined} the items, or undefined when any cannot be read.
+     */
+    function decodeArray(text) {
+      const inner = text.slice(1, -1).trim()
+      if (inner === '') return []
+      const items = []
+      let depth = 0
+      let quote = ''
+      let start = 0
+      for (let i = 0; i < inner.length; i += 1) {
+        const ch = inner[i]
+        if (quote !== '') {
+          if (ch === '\\' && quote === '"') i += 1
+          else if (ch === quote) quote = ''
+          continue
+        }
+        if (ch === '"' || ch === "'") quote = ch
+        else if (ch === '[' || ch === '{') depth += 1
+        else if (ch === ']' || ch === '}') depth -= 1
+        else if (ch === ',' && depth === 0) {
+          items.push(inner.slice(start, i))
+          start = i + 1
+        }
+      }
+      items.push(inner.slice(start))
+
+      const decoded = items.map((item) => decode(item.trim()))
+      return decoded.some((item) => item === undefined) ? undefined : decoded
     }
 
     /**
@@ -552,7 +592,12 @@ window.__ModuleLoader__.load({
       const rows = Array.isArray(doc.epic) ? doc.epic : []
       return rows
         .filter((row) => typeof row.slug === 'string' && row.slug !== '')
-        .map((row) => ({ id: row.id ?? null, slug: row.slug, title: row.title ?? '' }))
+        .map((row) => ({
+          id: row.id ?? null,
+          slug: row.slug,
+          title: row.title ?? '',
+          after: Array.isArray(row.after) ? row.after.map(String) : [],
+        }))
     }
 
     /**
@@ -570,6 +615,12 @@ window.__ModuleLoader__.load({
         type: typeof row.type === 'string' ? row.type : 'story',
         title: typeof row.title === 'string' ? row.title : '',
         v6Key: typeof row.v6_key === 'string' ? row.v6_key : null,
+        // what this ticket waits for, in `<epic id>.<entry id>` refs
+        after: Array.isArray(row.after) ? row.after.map(String) : [],
+        covers: Array.isArray(row.covers) ? row.covers.map(String) : [],
+        hitl: row.hitl === true,
+        // a ticket the store still has to settle before it can be started
+        refine: row.refine === true,
       }))
     }
 
@@ -993,6 +1044,9 @@ window.__ModuleLoader__.load({
             type: entry.type,
             title: leaf?.title ?? entry.title,
             v6Key: entry.v6Key,
+            after: entry.after,
+            covers: entry.covers,
+            hitl: entry.hitl,
             word,
             status: ticketStatus(plan, leaf),
             plan,
@@ -1107,6 +1161,40 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * What can happen next, following the order `tickets.py next` classifies by.
+     *
+     * One answer, because a board that offers three has not answered. The order is
+     * the store's own: finish what is open, then start what is ready -- a ticket
+     * whose `after` are all done -- then, when nothing is ready, the reason is
+     * usually that the work has not been written yet, which is a container with no
+     * tickets under it.
+     *
+     * A ticket carrying a status word the store does not define is never offered: it
+     * has to be settled before it can be worked.
+     *
+     * @param {object} initiative - from {@link buildInitiative}.
+     * @returns {object} `{kind, ticket?, epic?}` where kind is continue, start, slice or none.
+     */
+    function nextStep(initiative) {
+      const tickets = initiative.epics.flatMap((epic) =>
+        epic.tickets.map((ticket) => ({ ...ticket, epic })))
+      const settledRefs = new Set(tickets.filter((t) => SETTLED.has(t.status)).map((t) => t.ref))
+      const open = tickets.filter((t) => !SETTLED.has(t.status))
+
+      const running = open.find((t) => t.status === 'in-progress' || t.status === 'review')
+      if (running !== undefined) return { kind: 'continue', ticket: running }
+
+      const ready = open.find((t) => t.status !== 'unknown'
+        && t.after.every((dep) => settledRefs.has(dep)))
+      if (ready !== undefined) return { kind: 'start', ticket: ready }
+
+      const unsliced = initiative.epics.find((epic) => epic.tickets.length === 0)
+      if (unsliced !== undefined) return { kind: 'slice', epic: unsliced }
+
+      return { kind: 'none' }
+    }
+
+    /**
      * v7 checks: what the ticket store and the tickets on disk disagree about.
      *
      * The v6 detectors compared a sprint file against deferred work and review
@@ -1159,6 +1247,13 @@ window.__ModuleLoader__.load({
       const gaps = []
       const unverifiable = []
       const where = initiative.slug
+
+      // An epic nobody has sliced yet is why the lanes below it are empty, so it is
+      // the first thing the board says rather than the last.
+      for (const epic of initiative.epics) {
+        const unsliced = detectUnslicedEpic(epic)
+        if (unsliced !== null) gaps.push(unsliced)
+      }
 
       // A ticket file the store cannot classify is invisible to `tickets.py`. The
       // store tells leaves from plans by frontmatter type, so a `*-plan.md` whose
@@ -1282,6 +1377,37 @@ window.__ModuleLoader__.load({
       }
 
       return { gaps, unverifiable }
+    }
+
+    /**
+     * An epic with no tickets under it.
+     *
+     * The store slices an initiative into epics and an epic into stories, so an epic
+     * with an empty ticket folder has not been planned yet -- and nothing can start
+     * until it is. This is the finding that explains an otherwise silent board: every
+     * lane is empty because the work has not been written down.
+     *
+     * The action names the Product Owner because planning an epic is Sofia's job, not
+     * the builder's: `slice.md` has her refine the epic and write all its stories
+     * before any of them can be worked.
+     *
+     * @param {object} epic - one epic from the model.
+     * @returns {object|null} the gap, or null when the epic holds tickets.
+     */
+    function detectUnslicedEpic(epic) {
+      if (epic.tickets.length > 0) return null
+      return gap({
+        id: 'E2',
+        title: 'epic has no stories',
+        severity: 'medium',
+        subject: epic.slug,
+        subjectKind: 'epic',
+        evidence: 'the epic exists and its ticket store lists no stories, so nothing in it can start.',
+        action: ask(
+          `/bmad-agent-po Plan epic ${epic.slug} ("${epic.title}"). Its ticket store lists no `
+          + 'stories yet: refine it, then write its stories so the work can be started.',
+        ),
+      })
     }
 
     /**
@@ -1531,6 +1657,32 @@ window.__ModuleLoader__.load({
     // --- Styles ------------------------------------------------------------
 
     const CSS = `
+      .bmad-sb-next {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        margin-bottom: 10px;
+        border-radius: 8px;
+        background: var(--dsw-alias-bg-secondary);
+        border: 1px solid var(--dsw-alias-border-secondary);
+      }
+      .bmad-sb-nextlabel {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--dsw-alias-label-secondary);
+        flex: 0 0 auto;
+      }
+      .bmad-sb-nextbody {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
 .bmad-sb-root{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;line-height:1.45;color:var(--dsw-alias-label-primary)}
 .bmad-sb-head{flex:0 0 auto;display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .bmad-sb-titlerow{display:flex;align-items:center;gap:8px}
@@ -2272,6 +2424,46 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       );
 
     /**
+     * What to do next, in one line.
+     *
+     * The board answers once. The order comes from the store: finish what is
+     * open, start what is ready, and when nothing is ready the reason is usually
+     * that the work has not been written yet.
+     * @param t - the dictionary.
+     * @param next - from `nextStep`.
+     * @returns the words.
+     */
+    function nextText(t, next) {
+      if (next.kind === 'continue') {
+        return t('nextContinue', { ref: next.ticket.ref, title: next.ticket.title });
+      }
+      if (next.kind === 'start') {
+        return t('nextStart', { ref: next.ticket.ref, title: next.ticket.title });
+      }
+      if (next.kind === 'slice') {
+        return t('nextSlice', { title: next.epic.title });
+      }
+      return t('nextNone');
+    }
+
+    /**
+     * The prompt the next step copies. Planning an epic is the Product Owner's,
+     * building a ticket is the builder's, so they are different skills.
+     * @param next - from `nextStep`.
+     * @returns the string to copy.
+     */
+    function nextPayload(next) {
+      if (next.kind === 'slice') {
+        return `/bmad-agent-po Plan epic ${next.epic.slug} ("${next.epic.title}"). Its ticket `
+          + 'store lists no stories yet: refine it, then write its stories so the work can be started.';
+      }
+      if (next.kind === 'continue' || next.kind === 'start') {
+        return `/bmad-build ${next.ticket.ref} ${next.ticket.title}`;
+      }
+      return '';
+    }
+
+    /**
      * Work the project decided not to do now.
      *
      * Each entry keeps the section it came from, because "deferred" without
@@ -2640,6 +2832,24 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
               onToggle: foldHandler(onFlip, 'deferred', false),
             });
 
+      const next = nextStep(initiative);
+      const nextLine =
+        next.kind === 'none'
+          ? null
+          : h('div', { className: 'bmad-sb-next' },
+              h('span', { className: 'bmad-sb-nextlabel' }, t('nextLabel')),
+              h(
+                'span',
+                { className: 'bmad-sb-nextbody' },
+                nextText(t, next),
+              ),
+              h(CopyButton, {
+                t,
+                label: t('askAgent'),
+                value: nextPayload(next),
+              }),
+            );
+
       const detected = detectInitiative(initiative);
       const empty = detectEmptyInitiative(initiative);
       const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
@@ -2671,6 +2881,7 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       return h(
         'div',
         null,
+        nextLine,
         lanes.length === 0 ? h('div', { className: 'bmad-sb-note' }, t('noTickets')) : lanes,
         unreadable > 0
           ? h(
@@ -3057,6 +3268,12 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
+      'nextLabel': 'Next',
+      'askAgent': 'Ask agent',
+      'nextContinue': 'Continue {ref} -- {title}',
+      'nextStart': 'Start {ref} -- {title}',
+      'nextSlice': 'Plan the stories for {title}',
+      'nextNone': 'Nothing is waiting to be started.',
       'deferredLabel': 'Deferred work',
       'deferredFrom': 'deferred from {source}',
       'pickUpDeferred': 'Ask agent to pick this up',
@@ -3126,6 +3343,12 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'nextLabel': '\u4e0b\u4e00\u6b65',
+      'askAgent': '\u8ba9\u667a\u80fd\u4f53\u5904\u7406',
+      'nextContinue': '\u7ee7\u7eed {ref} -- {title}',
+      'nextStart': '\u5f00\u59cb {ref} -- {title}',
+      'nextSlice': '\u4e3a\u300c{title}\u300d\u7f16\u5199\u6545\u4e8b',
+      'nextNone': '\u6ca1\u6709\u5f85\u5f00\u59cb\u7684\u5de5\u4f5c\u3002',
       'deferredLabel': '\u5ef6\u671f\u5de5\u4f5c',
       'deferredFrom': '\u5ef6\u671f\u81ea {source}',
       'pickUpDeferred': '\u8ba9\u667a\u80fd\u4f53\u63a5\u624b\u6b64\u9879',

@@ -19,6 +19,7 @@ import {
   buildInitiative,
   containerState,
   humanise,
+  nextStep,
   stateOf,
   statusLanes,
   ticketStatus,
@@ -296,4 +297,99 @@ test('a silent epic whose tickets are all settled reads done', () => {
   })
   assert.equal(model.epics[0].status, 'done')
   assert.equal(model.status, 'done', 'and so does the initiative above it')
+})
+
+test('nextStep finishes what is open before starting anything new', () => {
+  const model = initiative({ files: [leaf(1, 'in-progress'), leaf(2, 'done')] })
+  const next = nextStep(model)
+  assert.equal(next.kind, 'continue')
+  assert.equal(next.ticket.ref, '1.1')
+})
+
+test('nextStep starts a ticket once what it waits for is done', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\n---\n",
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      storyIndex: `[[entry]]
+id = "1"
+type = "story"
+title = "Ticket 1"
+[[entry]]
+id = "2"
+type = "story"
+title = "Ticket 2"
+after = ["1.1"]`,
+      files: [leaf(1, 'done'), leaf(2, '')],
+    }],
+  })
+  const next = nextStep(model)
+  assert.equal(next.kind, 'start')
+  assert.equal(next.ticket.ref, '1.2', 'the dependency is met')
+})
+
+test('a ticket whose dependency is not done is not offered as next', () => {
+  const model = buildInitiative({
+    slug: 'x', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'X'\n---\n",
+    epics: [{
+      id: 1, slug: 'epic-a', title: 'A', folder: 'f',
+      storyIndex: `[[entry]]
+id = "1"
+type = "story"
+title = "Ticket 1"
+[[entry]]
+id = "2"
+type = "story"
+title = "Ticket 2"
+after = ["1.1"]`,
+      files: [leaf(1, ''), leaf(2, '')],
+    }],
+  })
+  const next = nextStep(model)
+  // 1.1 is ready and 1.2 waits on it, so the answer is 1.1
+  assert.equal(next.kind, 'start')
+  assert.equal(next.ticket.ref, '1.1')
+})
+
+test('nextStep names the unsliced epic when nothing is ready', () => {
+  // The live shape: every ticket settled, two epics with no stories written.
+  const model = buildInitiative({
+    slug: 'vip', dir: 'd',
+    ticket: "---\ntype: initiative\ntitle: 'VIP'\n---\n",
+    epics: [
+      {
+        id: 1, slug: 'epic-done', title: 'Done', folder: 'a',
+        ticket: "---\ntype: epic\ntitle: 'Done'\nstatus: 'done'\n---\n",
+        storyIndex: storyIndex(1), files: [leaf(1, 'done')],
+      },
+      {
+        id: 2, slug: 'epic-empty', title: 'Empty', folder: 'b',
+        ticket: "---\ntype: epic\ntitle: 'Empty'\n---\n",
+        storyIndex: storyIndex(0), files: [],
+      },
+    ],
+  })
+  const next = nextStep(model)
+  assert.equal(next.kind, 'slice')
+  assert.equal(next.epic.slug, 'epic-empty')
+  // and the epic is reported, with the Product Owner named in the action
+  const { gaps } = detectInitiative(model)
+  const e2 = gaps.find((g) => g.id === 'E2')
+  assert.ok(e2, 'E2 fired')
+  assert.match(e2.action.payload, /bmad-agent-po/)
+})
+
+test('nextStep says so when nothing is waiting', () => {
+  const model = initiative({ files: [leaf(1, 'done'), leaf(2, 'done')] })
+  const next = nextStep(model)
+  assert.equal(next.kind, 'none')
+})
+
+test('a ticket with an unrecognised status is never offered as next', () => {
+  const model = initiative({ entries: 2, files: [leaf(1, 'shipped')] })
+  const next = nextStep(model)
+  // 1.1 is unknown, so the only thing that can be offered is the other ticket
+  assert.notEqual(next.kind === 'start' && next.ticket.ref, '1.1')
 })

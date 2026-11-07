@@ -408,3 +408,44 @@ test('deferred work renders as its own lane, each entry carrying an action', asy
   )
   assert.ok(buttons.length >= 1, 'and carries a copyable action')
 })
+
+test('the board says what is next and offers the right skill for it', async () => {
+  const Board = loadBoard()
+  const io = face({
+    ...FILES,
+    // an epic with no tickets, after one that is finished: nothing to start,
+    // so the answer is to write the stories
+    '_bmad-output/initiative-open/tickets/tickets.toml':
+      '[[epic]]\nid = 1\nslug = "epic-a"\ntitle = "Epic A"\n'
+      + '[[epic]]\nid = 2\nslug = "epic-b"\ntitle = "Epic B"\n',
+    '_bmad-output/initiative-open/tickets/epic-b/epic-b.md':
+      "---\ntype: epic\ntitle: 'Epic B'\nparent: open\n---\n",
+    '_bmad-output/initiative-open/tickets/epic-a/tickets/story-wire-the-panel.md':
+      "---\nid: '1'\ntype: story\ntitle: 'Wire the panel'\nstatus: 'done'\n---\n",
+  })
+  const props = {
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { actions: {}, signal: new AbortController().signal } }),
+    sessionId: 'session-next',
+    readWorkspaceFile: io.read,
+    listWorkspaceDir: io.list,
+    statWorkspacePath: io.stat,
+    fileAddress: (path) => path,
+  }
+
+  const first = await settle(Board, props)
+  elements(first).find((element) => element.name === 'Card').props.onOpen()
+  const second = await settle(Board, props, { reset: false })
+
+  const found = elements(second)
+  // the "Next" line is present and carries a copyable action
+  const nextRow = found.find((element) => element.props?.className === 'bmad-sb-next')
+  assert.ok(nextRow, 'the next line rendered')
+  const buttons = elements(nextRow).filter(
+    (element) => element.name === 'CopyButton' || element.type?.name === 'CopyButton',
+  )
+  assert.ok(buttons.length === 1, 'it carries one action')
+  // an epic with no stories is a finding, and it names the Product Owner
+  const e2 = found.find((element) => element.props?.id === 'E2')
+  assert.ok(e2, 'the unsliced epic is reported')
+})

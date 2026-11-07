@@ -208,6 +208,9 @@ export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable
         type: entry.type,
         title: leaf?.title ?? entry.title,
         v6Key: entry.v6Key,
+        after: entry.after,
+        covers: entry.covers,
+        hitl: entry.hitl,
         word,
         status: ticketStatus(plan, leaf),
         plan,
@@ -319,4 +322,38 @@ export function statusLanes(initiative) {
   return [...groups]
     .map(([status, tickets]) => ({ status, tickets }))
     .sort((a, b) => rank(a.status) - rank(b.status))
+}
+
+/**
+ * What can happen next, following the order `tickets.py next` classifies by.
+ *
+ * One answer, because a board that offers three has not answered. The order is
+ * the store's own: finish what is open, then start what is ready -- a ticket
+ * whose `after` are all done -- then, when nothing is ready, the reason is
+ * usually that the work has not been written yet, which is a container with no
+ * tickets under it.
+ *
+ * A ticket carrying a status word the store does not define is never offered: it
+ * has to be settled before it can be worked.
+ *
+ * @param {object} initiative - from {@link buildInitiative}.
+ * @returns {object} `{kind, ticket?, epic?}` where kind is continue, start, slice or none.
+ */
+export function nextStep(initiative) {
+  const tickets = initiative.epics.flatMap((epic) =>
+    epic.tickets.map((ticket) => ({ ...ticket, epic })))
+  const settledRefs = new Set(tickets.filter((t) => SETTLED.has(t.status)).map((t) => t.ref))
+  const open = tickets.filter((t) => !SETTLED.has(t.status))
+
+  const running = open.find((t) => t.status === 'in-progress' || t.status === 'review')
+  if (running !== undefined) return { kind: 'continue', ticket: running }
+
+  const ready = open.find((t) => t.status !== 'unknown'
+    && t.after.every((dep) => settledRefs.has(dep)))
+  if (ready !== undefined) return { kind: 'start', ticket: ready }
+
+  const unsliced = initiative.epics.find((epic) => epic.tickets.length === 0)
+  if (unsliced !== undefined) return { kind: 'slice', epic: unsliced }
+
+  return { kind: 'none' }
 }
