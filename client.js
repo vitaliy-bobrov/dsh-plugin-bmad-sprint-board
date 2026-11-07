@@ -702,6 +702,88 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The deferred-work ledger.
+     *
+     * BMAD records work it decided not to do now in `deferred-work.md`, one section
+     * per source:
+     *
+     *   ## Deferred from: <what deferred it> (<date>)
+     *
+     *   - one entry
+     *   - another entry
+     *
+     * That is the whole format. A section's heading is the provenance and its
+     * bullets are the entries, which is why this reader keeps the two together
+     * rather than flattening to a list: "deferred" without "deferred from what" is
+     * a note nobody can act on.
+     *
+     * A file laid out any other way yields nothing rather than a guess, so a ledger
+     * this cannot read shows as absent instead of as empty.
+     *
+     * @module dsh-plugin-bmad-sprint-board/deferred
+     */
+
+    /** The heading that opens a section, with an optional `(YYYY-MM-DD)` at the end. */
+    const SECTION = /^##[ \t]+Deferred from:[ \t]*(.*?)[ \t]*$/
+    /** A bullet, indented or not; the entry is everything after the marker. */
+    const BULLET = /^[ \t]*[-*][ \t]+(.*)$/
+    /** A trailing date in parentheses. */
+    const DATE = /\((\d{4}-\d{2}-\d{2})\)[ \t]*$/
+
+    /**
+     * Parse a deferred-work ledger.
+     *
+     * @param {string|null} text - the file's contents, or null when it is absent.
+     * @returns {{sections: Array<{source: string, date: string|null, items: string[]}>, count: number}} the sections and how many entries they hold.
+     */
+    function parseDeferred(text) {
+      if (typeof text !== 'string') return { sections: [], count: 0 }
+
+      const sections = []
+      let current = null
+
+      for (const line of text.split('\n')) {
+        const heading = SECTION.exec(line)
+        if (heading !== null) {
+          const raw = heading[1]
+          const dated = DATE.exec(raw)
+          current = {
+            source: dated === null ? raw : raw.slice(0, dated.index).trim(),
+            date: dated === null ? null : dated[1],
+            items: [],
+          }
+          sections.push(current)
+          continue
+        }
+        if (/^##[ \t]/.test(line)) {
+          // a different section ends the deferred block
+          current = null
+          continue
+        }
+        const bullet = BULLET.exec(line)
+        if (bullet === null || current === null) continue
+        const item = bullet[1].trim()
+        if (item !== '') current.items.push(item)
+      }
+
+      const counted = sections.filter((section) => section.items.length > 0)
+      return {
+        sections: counted,
+        count: counted.reduce((total, section) => total + section.items.length, 0),
+      }
+    }
+
+    /**
+     * The workspace path of an initiative's ledger.
+     *
+     * @param {string} initiativeDir - the initiative's folder.
+     * @returns {string} the path to try.
+     */
+    function deferredPath(initiativeDir) {
+      return `${initiativeDir}/deferred-work.md`
+    }
+
+    /**
      * The board model: one BMAD v7 project, read into initiatives, epics and tickets.
      *
      * The model is built from text alone -- it never touches the file system, so it
@@ -713,6 +795,7 @@ window.__ModuleLoader__.load({
      *
      * @module dsh-plugin-bmad-sprint-board/model
      */
+
 
 
 
@@ -873,8 +956,9 @@ window.__ModuleLoader__.load({
      * @param {number} input.unreadable - how many files could not be read.
      * @returns {object} the initiative model.
      */
-    function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
+    function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable = 0 }) {
       const own = readInitiativeTicket(ticket)
+      const ledger = parseDeferred(deferred)
       const built = epics.map((epic) => {
         const header = readEpicTicket(epic.ticket)
         const entries = readStoryIndex(epic.storyIndex)
@@ -977,7 +1061,9 @@ window.__ModuleLoader__.load({
         status: containerState(own.status, built.map((epic) => epic.status)),
         rawStatus: own.status,
         epics: built,
+        deferred: ledger.sections,
         counts: {
+          deferred: ledger.count,
           epics: built.length,
           tickets: total,
           unknown,
@@ -1373,9 +1459,10 @@ window.__ModuleLoader__.load({
       const slug = name.slice(INITIATIVE_PREFIX.length)
       const before = unreadable.length
 
-      const [ticket, indexText] = await Promise.all([
+      const [ticket, indexText, deferred] = await Promise.all([
         tryRead(io, join(dir, `${name}.md`), signal),
         tryRead(io, join(join(dir, 'tickets'), 'tickets.toml'), signal),
+        tryRead(io, join(dir, 'deferred-work.md'), signal),
       ])
 
       const rows = readEpicIndex(indexText)
@@ -1386,6 +1473,7 @@ window.__ModuleLoader__.load({
         slug,
         dir,
         ticket,
+        deferred,
         epics,
         unreadable: unreadable.length - before,
       })
@@ -2184,6 +2272,32 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       );
 
     /**
+     * Work the project decided not to do now.
+     *
+     * Each entry keeps the section it came from, because "deferred" without
+     * "deferred from what" is a note nobody can act on, and each carries a
+     * prompt so it can be picked up from the board rather than hunted for.
+     */
+    const deferredCards = (t, initiative) =>
+      initiative.deferred.flatMap((section) =>
+        section.items.map((item, index) =>
+          h(Card, {
+            key: `deferred:${section.source}:${index}`,
+            id: section.date ?? '',
+            tag: section.source,
+            tagTone: 'neutral',
+            title: item,
+            note: t('deferredFrom', { source: section.source }),
+            footer: h(CopyButton, {
+              t,
+              label: t('pickUpDeferred'),
+              value: t('deferredPrompt', { item, source: section.source }),
+            }),
+          }),
+        ),
+      );
+
+    /**
      * What the board could not check. The same lane and the same cards, dashed,
      * because this must never be mistaken for a finding nor for a clean result.
      */
@@ -2481,7 +2595,9 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           title: t('ticketStatus'),
         },
         note: showEpic === true ? ticket.epicTitle : '',
-        onOpen: makeOpener(ticket.plan === null ? null : ticket.plan.path),
+        // The plan is what a build writes; before that the leaf is the
+        // ticket, so whichever exists is the file worth opening.
+        onOpen: makeOpener(ticket.plan?.path ?? ticket.leaf?.path ?? null),
         openLabel: t('openPlan'),
       });
     }
@@ -2511,10 +2627,24 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         });
       });
 
+      const deferredLane =
+        initiative.counts.deferred === 0
+          ? null
+          : h(CardLane, {
+              key: 'deferred',
+              label: t('deferredLabel'),
+              token: '--dsw-alias-state-business-primary',
+              cards: deferredCards(t, initiative),
+              count: String(initiative.counts.deferred),
+              collapsed: isFolded(folded, 'deferred', false),
+              onToggle: foldHandler(onFlip, 'deferred', false),
+            });
+
       const detected = detectInitiative(initiative);
       const empty = detectEmptyInitiative(initiative);
       const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
       const findings = [
+        deferredLane,
         gaps.length === 0
           ? null
           : h(CardLane, {
@@ -2927,6 +3057,10 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
+      'deferredLabel': 'Deferred work',
+      'deferredFrom': 'deferred from {source}',
+      'pickUpDeferred': 'Ask agent to pick this up',
+      'deferredPrompt': 'Pick up this deferred item from {source}: {item}',
       'initiativeEmpty': 'nothing sliced into epics yet',
       'gapsLabel': 'Gaps',
       'unverLabel': 'Could not check',
@@ -2992,6 +3126,10 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'deferredLabel': '\u5ef6\u671f\u5de5\u4f5c',
+      'deferredFrom': '\u5ef6\u671f\u81ea {source}',
+      'pickUpDeferred': '\u8ba9\u667a\u80fd\u4f53\u63a5\u624b\u6b64\u9879',
+      'deferredPrompt': '\u63a5\u624b\u6765\u81ea {source} \u7684\u5ef6\u671f\u9879\uff1a{item}',
             'initiativeEmpty': '\u5c1a\u672a\u5207\u5206\u4e3a\u4efb\u52a1\u5305',
       'gapsLabel': '\u5dee\u8ddd',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',

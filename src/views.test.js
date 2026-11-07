@@ -370,3 +370,41 @@ test('an initiative card is labelled with words, and an empty store says so', as
   // And a settled initiative with no epics contradicts itself, so it says so.
   assert.match(vip.props.note, /initiativeEmpty/)
 })
+
+test('deferred work renders as its own lane, each entry carrying an action', async () => {
+  const Board = loadBoard()
+  const io = face({
+    ...FILES,
+    '_bmad-output/initiative-open/deferred-work.md':
+      '## Deferred from: code review of story-wire-the-panel (2026-10-27)\n\n- a duplicated query, performance only\n',
+  })
+  const props = {
+    t: (key) => key,
+    useTabInfo: () => ({ tab: { actions: {}, signal: new AbortController().signal } }),
+    sessionId: 'session-deferred',
+    readWorkspaceFile: io.read,
+    listWorkspaceDir: io.list,
+    statWorkspacePath: io.stat,
+    fileAddress: (path) => path,
+  }
+
+  const first = await settle(Board, props)
+  const card = elements(first).find((element) => element.name === 'Card')
+  card.props.onOpen()
+  const second = await settle(Board, props, { reset: false })
+
+  const lanes = elements(second).filter((element) => element.name === 'CardLane')
+  const deferred = lanes.find((lane) => lane.props.label === 'deferredLabel')
+  assert.ok(deferred, `expected a deferred lane, saw: ${lanes.map((l) => l.props.label).join(', ')}`)
+  assert.equal(deferred.props.count, '1')
+  // the entry keeps its provenance and offers something to do about it
+  // a lane's cards live in its props rather than in rendered children
+  const cards = elements(deferred).filter(
+    (element) => element.name === 'Card' || element.type?.name === 'Card',
+  )
+  assert.ok(cards.length >= 1, 'the entry rendered as a card')
+  const buttons = elements(deferred).filter(
+    (element) => element.name === 'CopyButton' || element.type?.name === 'CopyButton',
+  )
+  assert.ok(buttons.length >= 1, 'and carries a copyable action')
+})

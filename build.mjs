@@ -63,6 +63,7 @@ const pieces = [
   inline(read('frontmatter.js')),
   inline(read('config.js')),
   inline(read('store.js')),
+  inline(read('deferred.js')),
   inline(read('model.js')),
   inline(read('detect.js')),
   inline(read('scan.js')),

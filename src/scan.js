@@ -151,9 +151,10 @@ async function readInitiative(io, outputFolder, name, signal, unreadable) {
   const slug = name.slice(INITIATIVE_PREFIX.length)
   const before = unreadable.length
 
-  const [ticket, indexText] = await Promise.all([
+  const [ticket, indexText, deferred] = await Promise.all([
     tryRead(io, join(dir, `${name}.md`), signal),
     tryRead(io, join(join(dir, 'tickets'), 'tickets.toml'), signal),
+    tryRead(io, join(dir, 'deferred-work.md'), signal),
   ])
 
   const rows = readEpicIndex(indexText)
@@ -164,6 +165,7 @@ async function readInitiative(io, outputFolder, name, signal, unreadable) {
     slug,
     dir,
     ticket,
+    deferred,
     epics,
     unreadable: unreadable.length - before,
   })

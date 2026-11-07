@@ -12,6 +12,7 @@
  */
 
 import { readFrontmatter, stringOf } from './frontmatter.js'
+import { parseDeferred } from './deferred.js'
 import { classify, readLeaf, readPlan, readStoryIndex, slugify } from './store.js'
 
 /**
@@ -170,8 +171,9 @@ export function ticketStatus(plan, leaf) {
  * @param {number} input.unreadable - how many files could not be read.
  * @returns {object} the initiative model.
  */
-export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
+export function buildInitiative({ slug, dir, ticket, deferred, epics, unreadable = 0 }) {
   const own = readInitiativeTicket(ticket)
+  const ledger = parseDeferred(deferred)
   const built = epics.map((epic) => {
     const header = readEpicTicket(epic.ticket)
     const entries = readStoryIndex(epic.storyIndex)
@@ -274,7 +276,9 @@ export function buildInitiative({ slug, dir, ticket, epics, unreadable = 0 }) {
     status: containerState(own.status, built.map((epic) => epic.status)),
     rawStatus: own.status,
     epics: built,
+    deferred: ledger.sections,
     counts: {
+      deferred: ledger.count,
       epics: built.length,
       tickets: total,
       unknown,

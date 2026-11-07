@@ -742,6 +742,32 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       );
 
     /**
+     * Work the project decided not to do now.
+     *
+     * Each entry keeps the section it came from, because "deferred" without
+     * "deferred from what" is a note nobody can act on, and each carries a
+     * prompt so it can be picked up from the board rather than hunted for.
+     */
+    const deferredCards = (t, initiative) =>
+      initiative.deferred.flatMap((section) =>
+        section.items.map((item, index) =>
+          h(Card, {
+            key: `deferred:${section.source}:${index}`,
+            id: section.date ?? '',
+            tag: section.source,
+            tagTone: 'neutral',
+            title: item,
+            note: t('deferredFrom', { source: section.source }),
+            footer: h(CopyButton, {
+              t,
+              label: t('pickUpDeferred'),
+              value: t('deferredPrompt', { item, source: section.source }),
+            }),
+          }),
+        ),
+      );
+
+    /**
      * What the board could not check. The same lane and the same cards, dashed,
      * because this must never be mistaken for a finding nor for a clean result.
      */
@@ -1039,7 +1065,9 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
           title: t('ticketStatus'),
         },
         note: showEpic === true ? ticket.epicTitle : '',
-        onOpen: makeOpener(ticket.plan === null ? null : ticket.plan.path),
+        // The plan is what a build writes; before that the leaf is the
+        // ticket, so whichever exists is the file worth opening.
+        onOpen: makeOpener(ticket.plan?.path ?? ticket.leaf?.path ?? null),
         openLabel: t('openPlan'),
       });
     }
@@ -1069,10 +1097,24 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
         });
       });
 
+      const deferredLane =
+        initiative.counts.deferred === 0
+          ? null
+          : h(CardLane, {
+              key: 'deferred',
+              label: t('deferredLabel'),
+              token: '--dsw-alias-state-business-primary',
+              cards: deferredCards(t, initiative),
+              count: String(initiative.counts.deferred),
+              collapsed: isFolded(folded, 'deferred', false),
+              onToggle: foldHandler(onFlip, 'deferred', false),
+            });
+
       const detected = detectInitiative(initiative);
       const empty = detectEmptyInitiative(initiative);
       const gaps = empty === null ? detected.gaps : [empty, ...detected.gaps];
       const findings = [
+        deferredLane,
         gaps.length === 0
           ? null
           : h(CardLane, {
@@ -1485,6 +1527,10 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': 'shown here',
       'selectInitiative': 'Show this initiative on the board',
       'settledInitiatives': 'settled initiatives',
+      'deferredLabel': 'Deferred work',
+      'deferredFrom': 'deferred from {source}',
+      'pickUpDeferred': 'Ask agent to pick this up',
+      'deferredPrompt': 'Pick up this deferred item from {source}: {item}',
       'initiativeEmpty': 'nothing sliced into epics yet',
       'gapsLabel': 'Gaps',
       'unverLabel': 'Could not check',
@@ -1550,6 +1596,10 @@ line-height:16px;font-weight:700;white-space:nowrap;animation:bmad-sb-tip-in 140
       'selectedBadge': '\u5f53\u524d\u663e\u793a',
       'selectInitiative': '\u5728\u770b\u677f\u4e2d\u663e\u793a\u6b64\u5021\u8bae',
       'settledInitiatives': '\u5df2\u7ed3\u675f\u7684\u5021\u8bae',
+      'deferredLabel': '\u5ef6\u671f\u5de5\u4f5c',
+      'deferredFrom': '\u5ef6\u671f\u81ea {source}',
+      'pickUpDeferred': '\u8ba9\u667a\u80fd\u4f53\u63a5\u624b\u6b64\u9879',
+      'deferredPrompt': '\u63a5\u624b\u6765\u81ea {source} \u7684\u5ef6\u671f\u9879\uff1a{item}',
             'initiativeEmpty': '\u5c1a\u672a\u5207\u5206\u4e3a\u4efb\u52a1\u5305',
       'gapsLabel': '\u5dee\u8ddd',
       'unverLabel': '\u65e0\u6cd5\u68c0\u67e5',
